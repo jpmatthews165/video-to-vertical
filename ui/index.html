@@ -66,7 +66,11 @@
 
   .player { position: relative; margin-top: 12px; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden;
             background: var(--field); }
-  .player iframe, .player #yt { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .player iframe, .player #yt, .player video { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .player video { display: none; background: #000; object-fit: contain; }
+  .spinner { width: 22px; height: 22px; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--accent);
+             animation: spin .8s linear infinite; margin: 0 auto 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .placeholder { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
                  color: var(--muted); font-size: 13px; padding: 20px; }
   .placeholder svg { display: block; margin: 0 auto 8px; opacity: .55; }
@@ -165,6 +169,8 @@
           Paste a link to preview your clip
         </div>
       </div>
+      <video id="vid" controls playsinline preload="metadata"></video>
+      <audio id="aud" preload="auto"></audio>
       <div id="yt"></div>
     </div>
 
@@ -185,7 +191,7 @@
       </div>
     </div>
     <div class="clipinfo">
-      <span id="hint">Use <b>Set</b> to grab the player's current time.</span>
+      <span id="hint"><button class="ghost" id="playClip" type="button" disabled style="margin-left:-10px">▶ Play clip</button> · pause anywhere and press <b>Set</b></span>
       <span class="chip" id="len">1:00</span>
     </div>
   </section>
@@ -284,61 +290,155 @@ function refreshTimes() {
   return ok;
 }
 
-/* ---------- YouTube preview ---------- */
-function loadYT() {
-  if (window.YT && YT.Player) { ytReady = true; return; }
-  const tag = document.createElement("script");
-  tag.src = "https://www.youtube.com/iframe_api";
-  tag.onerror = () => { ytFailed = true; document.head.removeChild(tag); if (videoId) showFallback("Couldn't load the preview (are you online?)."); };
-  document.head.appendChild(tag);
+/* ---------- Preview ----------
+   1st choice: a small stream fetched by the app and played in a <video> element (works even when
+   YouTube blocks embedding). 2nd: YouTube's embedded player. Last: an "Open in YouTube" link. */
+const PLACEHOLDER = `<div><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>Paste a link to preview your clip</div>`;
+let mode = null, reqId = 0, prevT = 0;
+const vid = () => $("vid"), aud = () => $("aud");
+
+function setPlaceholder(html) { $("ph").style.display = "grid"; $("ph").innerHTML = html; }
+function enableSet(on) {
+  document.querySelectorAll(".setbtn").forEach(b => b.disabled = !on);
+  $("playClip").disabled = !on;
 }
-window.onYouTubeIframeAPIReady = () => { ytReady = true; if (videoId) showPreview(); };
+function log(msg) { try { api && api.js_log(msg); } catch (_) {} }
 
 function showFallback(msg) {
-  $("ph").style.display = "grid";
-  $("ph").innerHTML = `<div>${msg}<br><a id="openYt">Open in YouTube ↗</a></div>`;
+  setPlaceholder(`<div>${msg}<br><a id="openYt">Open in YouTube ↗</a></div>`);
   const a = $("openYt");
   if (a) a.onclick = () => api && api.open_url(`https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(range().s || 0)}s`);
 }
 
-function cueClip() {
-  if (!player || !player.cueVideoById) return;
-  const { s, e } = range();
-  const opts = { videoId, startSeconds: s || 0 };
-  if (e && s !== null && e > s) opts.endSeconds = e;
-  player.cueVideoById(opts);
+function resetPreview() {
+  reqId++;
+  const v = vid(), au = aud();
+  v.pause(); au.pause();
+  v.removeAttribute("src"); au.removeAttribute("src"); v.load(); au.load();
+  v.style.display = "none";
+  if (player) { try { player.destroy(); } catch (_) {} player = null; }
+  const old = $("yt"); if (old) old.remove();
+  const d = document.createElement("div"); d.id = "yt"; $("player").appendChild(d);
+  mode = null; enableSet(false);
 }
 
-function showPreview() {
+function currentTime() {
+  if (mode === "native") return vid().currentTime;
+  if (mode === "yt" && player && player.getCurrentTime) return player.getCurrentTime();
+  return null;
+}
+
+function cueClip() {
+  const { s, e } = range();
+  if (mode === "native") {
+    const v = vid();
+    if (v.paused && s !== null && v.readyState >= 1) v.currentTime = s;
+  } else if (mode === "yt" && player && player.cueVideoById) {
+    const opts = { videoId, startSeconds: s || 0 };
+    if (e && s !== null && e > s) opts.endSeconds = e;
+    player.cueVideoById(opts);
+  }
+}
+
+function playClip() {
+  const { s } = range();
+  if (s === null) return;
+  if (mode === "native") { vid().currentTime = s; vid().play(); }
+  else if (mode === "yt" && player) { player.seekTo(s, true); player.playVideo(); }
+}
+
+async function showPreview() {
   if (!videoId) return;
+  resetPreview();
+  const my = reqId;
+  setPlaceholder(`<div><div class="spinner"></div>Loading preview…</div>`);
+  if (!api) { await new Promise(r => setTimeout(r, 800)); if (my !== reqId) return; }
+  let res = null;
+  try { res = api ? await api.preview_source($("url").value.trim()) : null; } catch (err) { res = { error: String(err) }; }
+  if (my !== reqId) return;
+  if (res && res.video) startNative(res, my);
+  else startYT(my);
+}
+
+function startNative(src, my) {
+  mode = "native";
+  const v = vid(), au = aud();
+  let failed = false;
+  v.onerror = () => {
+    if (failed || my !== reqId) return; failed = true;
+    log(`Preview stream error (${v.error ? v.error.code : "?"}); trying YouTube player.`);
+    resetPreview(); reqId = my; startYT(my);
+  };
+  v.onloadedmetadata = () => {
+    if (my !== reqId) return;
+    $("ph").style.display = "none";
+    v.style.display = "block";
+    const { s } = range();
+    if (s !== null) v.currentTime = Math.min(s, Math.max(0, v.duration - 1));
+    enableSet(true);
+  };
+  if (src.audio) {                       // separate audio track: keep it in step with the video
+    au.src = src.audio;
+    v.onplay = () => { au.currentTime = v.currentTime; au.play().catch(() => {}); };
+    v.onpause = () => au.pause();
+    v.onseeked = () => { au.currentTime = v.currentTime; };
+    v.onvolumechange = () => { au.volume = v.volume; au.muted = v.muted; };
+    v.onratechange = () => { au.playbackRate = v.playbackRate; };
+  } else {
+    v.onplay = v.onpause = v.onseeked = v.onvolumechange = v.onratechange = null;
+  }
+  v.src = src.video;
+}
+
+function startYT(my) {
+  mode = "yt";
   if (!ytReady) {
-    if (ytFailed) { ytFailed = false; loadYT(); showFallback("Loading preview…"); } else loadYT();
+    if (ytFailed) { showFallback("Preview unavailable for this video."); return; }
+    loadYT();
+    const wait = setInterval(() => {
+      if (my !== reqId) return clearInterval(wait);
+      if (ytReady) { clearInterval(wait); startYT(my); }
+      else if (ytFailed) { clearInterval(wait); showFallback("Preview unavailable for this video."); }
+    }, 300);
     return;
   }
   $("ph").style.display = "none";
-  if (player) { cueClip(); return; }
   const { s, e } = range();
   player = new YT.Player("yt", {
     videoId,
     playerVars: { start: Math.floor(s || 0), end: e ? Math.ceil(e) : undefined, rel: 0, playsinline: 1,
                   modestbranding: 1, origin: location.origin },
     events: {
-      onReady: () => document.querySelectorAll(".setbtn").forEach(b => b.disabled = false),
-      onError: (ev) => showFallback(ev.data === 101 || ev.data === 150 ? "This video doesn't allow previews here."
-                                    : "Preview unavailable for this video."),
-      onStateChange: (ev) => {
-        // When the clip reaches its end, jump back to the start so it's easy to replay.
-        if (ev.data === YT.PlayerState.ENDED) { cueClip(); }
-      }
+      onReady: () => enableSet(true),
+      onError: (ev) => { log(`YouTube player error ${ev.data}`); showFallback("Preview unavailable for this video."); },
+      onStateChange: (ev) => { if (ev.data === YT.PlayerState.ENDED) cueClip(); }
     }
   });
-  clearInterval(loopTimer);
-  loopTimer = setInterval(() => {
-    if (!player || !player.getCurrentTime || player.getPlayerState() !== 1) return;
-    const { s, e } = range();
-    if (e !== null && player.getCurrentTime() >= e) { player.pauseVideo(); player.seekTo(s || 0, true); }
-  }, 250);
 }
+
+function loadYT() {
+  if (window.YT && YT.Player) { ytReady = true; return; }
+  if (document.getElementById("ytapi")) return;
+  const tag = document.createElement("script");
+  tag.id = "ytapi";
+  tag.src = "https://www.youtube.com/iframe_api";
+  tag.onerror = () => { ytFailed = true; tag.remove(); };
+  document.head.appendChild(tag);
+}
+window.onYouTubeIframeAPIReady = () => { ytReady = true; };
+
+// Stop at the End time (when playback crosses it), and jump back to Start.
+setInterval(() => {
+  const t = currentTime();
+  if (t === null) return;
+  const { s, e } = range();
+  const playing = mode === "native" ? !vid().paused : (player && player.getPlayerState && player.getPlayerState() === 1);
+  if (playing && e !== null && prevT < e && t >= e) {
+    if (mode === "native") { vid().pause(); vid().currentTime = s || 0; }
+    else { player.pauseVideo(); player.seekTo(s || 0, true); }
+  }
+  prevT = t;
+}, 100);
 
 function onUrlChange() {
   const url = $("url").value;
@@ -353,19 +453,17 @@ function onUrlChange() {
       $("start").value = fmt(t); $("end").value = fmt(t + len);
     }
     showPreview();
-  } else if (!id) {
+  } else if (!id && videoId) {
     videoId = null;
-    if (player) { player.destroy(); player = null; $("yt").remove(); const d = document.createElement("div"); d.id = "yt"; $("player").appendChild(d); }
-    $("ph").style.display = "grid";
-    $("ph").innerHTML = `<div><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>Paste a link to preview your clip</div>`;
-    document.querySelectorAll(".setbtn").forEach(b => b.disabled = true);
+    resetPreview();
+    setPlaceholder(PLACEHOLDER);
   }
   refreshTimes();
 }
 
 let cueTimer = null;
 function onTimesChange() {
-  if (refreshTimes() && player) { clearTimeout(cueTimer); cueTimer = setTimeout(cueClip, 500); }
+  if (refreshTimes() && mode) { clearTimeout(cueTimer); cueTimer = setTimeout(cueClip, 500); }
 }
 
 /* ---------- sliders ---------- */
@@ -423,10 +521,11 @@ function wire() {
   $("start").addEventListener("input", onTimesChange);
   $("end").addEventListener("input", onTimesChange);
   bindSlider("lock"); bindSlider("noise");
+  $("playClip").addEventListener("click", playClip);
 
   document.querySelectorAll(".setbtn").forEach(b => b.addEventListener("click", () => {
-    if (!player || !player.getCurrentTime) return;
-    const t = player.getCurrentTime();
+    const t = currentTime();
+    if (t === null) return;
     const target = b.dataset.target;
     $(target).value = fmt(t);
     if (target === "start") {             // keep end after start, within 5 min
@@ -449,7 +548,7 @@ function wire() {
     $("log").textContent = "";
     $("progress").classList.add("on");
     onProgress(0, "Starting…");
-    if (player && player.pauseVideo) player.pauseVideo();
+    if (mode === "native") vid().pause(); else if (player && player.pauseVideo) player.pauseVideo();
     setBusy(true);
     const res = await api.make_clip({
       url: $("url").value.trim(), start: $("start").value, end: $("end").value,

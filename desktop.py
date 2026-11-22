@@ -104,6 +104,17 @@ class Api:
     def paste(self):
         return read_clipboard()
 
+    def preview_source(self, url):
+        try:
+            return core.preview_sources(str(url), log=lambda m: self._js("onLog", m))
+        except Exception as e:
+            msg = str(e).splitlines()[0][:300]
+            self._js("onLog", msg)
+            return {"error": msg}
+
+    def js_log(self, msg):
+        self._js("onLog", str(msg)[:500])
+
     def open_url(self, url):
         if isinstance(url, str) and url.startswith("https://"):
             webbrowser.open(url)

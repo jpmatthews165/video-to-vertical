@@ -248,6 +248,44 @@ def download_section(url: str, start: float, end: float, workdir: str,
     return os.path.join(workdir, files[0])
 
 
+_preview_cache: dict = {}
+
+
+def preview_sources(url: str, log=print) -> dict:
+    """Direct, low-res stream URLs for the in-app preview player.
+
+    Returns {"video": url, "audio": url-or-None}. Uses a single 360p file with sound
+    when YouTube offers one, otherwise a small video-only stream plus an audio stream.
+    """
+    key = url.strip()
+    if key in _preview_cache:
+        return _preview_cache[key]
+    ytdlp, deno = ensure_tools(log=log)
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(deno) + os.pathsep + env.get("PATH", "")
+    base = [ytdlp, "--no-playlist", "--no-warnings", "-g", "--js-runtimes", f"deno:{deno}"]
+    tries = [
+        "18",                                                           # 360p mp4 with sound
+        "bv*[height<=480][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]",
+        "b[height<=720][vcodec^=avc1][acodec!=none]/b[height<=720]",
+    ]
+    last_err = ""
+    for fmt in tries:
+        try:
+            r = subprocess.run(base + ["-f", fmt, key], capture_output=True, text=True,
+                               timeout=90, env=env, **_quiet())
+        except subprocess.TimeoutExpired:
+            last_err = "timed out"
+            continue
+        urls = [u for u in r.stdout.split() if u.startswith("http")]
+        if r.returncode == 0 and urls:
+            res = {"video": urls[0], "audio": urls[1] if len(urls) > 1 else None}
+            _preview_cache[key] = res
+            return res
+        last_err = (r.stderr.strip().splitlines() or ["no playable format"])[-1]
+    raise RuntimeError(f"Preview unavailable: {last_err}")
+
+
 # --------------------------------------------------------------------------
 # Speaker detection
 # --------------------------------------------------------------------------
