@@ -220,6 +220,9 @@ def download_section(url: str, start: float, end: float, workdir: str,
         "--force-keyframes-at-cuts",
         "--ffmpeg-location", ffmpeg_exe(),
         "--js-runtimes", f"deno:{deno}",
+        # YouTube sometimes drops long high-bitrate connections; make ffmpeg resume instead of stopping.
+        "--downloader-args", "ffmpeg_i:-reconnect 1 -reconnect_streamed 1 "
+                             "-reconnect_on_network_error 1 -reconnect_delay_max 10",
         "-o", out_tmpl, url,
     ]
     log("Downloading section from YouTube…")
@@ -234,7 +237,7 @@ def download_section(url: str, start: float, end: float, workdir: str,
         m = re.search(r"\[download\]\s+([\d.]+)%", line)
         if m and progress:
             progress(0.02 + 0.18 * float(m.group(1)) / 100, "Downloading from YouTube")
-        elif "ERROR" in line or "WARNING" in line:
+        elif "ERROR" in line or "WARNING" in line or "Downloading 1 format" in line:
             log(line)
     proc.wait()
     files = [f for f in os.listdir(workdir) if f.startswith("source.") and not f.endswith(".part")]
@@ -440,6 +443,65 @@ def audio_filter(noise_reduction: float, normalize: bool = True,
     return ",".join(filters) if filters else "anull"
 
 
+
+# --------------------------------------------------------------------------
+# Reading video with ffmpeg (more robust than OpenCV's decoder)
+# --------------------------------------------------------------------------
+@dataclass
+class VideoInfo:
+    width: int
+    height: int
+    fps: float
+    duration: float | None
+    has_audio: bool
+    codec: str
+
+
+def probe(path: str) -> VideoInfo:
+    r = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", path],
+                       capture_output=True, text=True, errors="replace", **_quiet())
+    err = r.stderr
+    dur = None
+    m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", err)
+    if m:
+        dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    vline = next((l for l in err.splitlines() if "Video:" in l), "")
+    if not vline:
+        raise RuntimeError("The downloaded file has no video.")
+    wh = re.search(r"[ ,](\d{2,5})x(\d{2,5})[ ,\]]", vline + " ")
+    if not wh:
+        raise RuntimeError("Couldn't read the video size.")
+    fm = re.search(r"([\d.]+) fps", vline) or re.search(r"([\d.]+)k? tbr", vline)
+    fps = float(fm.group(1)) if fm else 30.0
+    if not (1 <= fps <= 240):
+        fps = 30.0
+    codec = (re.search(r"Video: (\w+)", vline) or [None, "?"])[1]
+    return VideoInfo(int(wh.group(1)), int(wh.group(2)), fps, dur, "Audio:" in err, codec)
+
+
+def iter_frames(path: str, info: VideoInfo, width: int | None = None):
+    """Yield BGR frames at a constant frame rate, optionally scaled to `width`."""
+    w, h = info.width, info.height
+    if width and width < w:
+        w, h = width // 2 * 2, int(round(info.height * width / info.width)) // 2 * 2
+    vf = f"fps={info.fps:g}" + (f",scale={w}:{h}:flags=area" if (w, h) != (info.width, info.height) else "")
+    cmd = [ffmpeg_exe(), "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0", "-an", "-sn",
+           "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            bufsize=w * h * 3 * 2, **_quiet())
+    size = w * h * 3
+    try:
+        while True:
+            buf = proc.stdout.read(size)
+            if len(buf) < size:
+                break
+            yield np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+    finally:
+        proc.stdout.close()
+        proc.kill()
+        proc.wait()
+
+
 # --------------------------------------------------------------------------
 # Main pipeline
 # --------------------------------------------------------------------------
@@ -454,13 +516,9 @@ class ClipSettings:
 
 def render_vertical(src_path: str, out_path: str, settings: ClipSettings,
                     progress=None, log=print) -> str:
-    cap = cv2.VideoCapture(src_path)
-    if not cap.isOpened():
-        raise RuntimeError("Couldn't open the downloaded video.")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    info = probe(src_path)
+    fps, src_w, src_h = info.fps, info.width, info.height
+    total = int((info.duration or 1) * fps) or 1
 
     crop_w = int(round(src_h * 9 / 16)) // 2 * 2
     crop_h = src_h
@@ -468,32 +526,32 @@ def render_vertical(src_path: str, out_path: str, settings: ClipSettings,
         crop_w = src_w // 2 * 2
         crop_h = int(round(src_w * 16 / 9)) // 2 * 2
 
-    # Pass 1: find the speaker.
-    log(f"Tracking speaker ({src_w}x{src_h} @ {fps:.2f}fps)…")
+    # Pass 1: find the speaker (on a smaller copy of each frame, for speed).
+    dur_txt = f", {info.duration:.1f}s" if info.duration else ""
+    log(f"Source: {src_w}x{src_h} @ {fps:g}fps, {info.codec}{dur_txt}")
+    log("Tracking speaker…")
     det = SpeakerDetector(log=log)
+    det_w = min(src_w, 1280)
+    back = src_w / det_w
     raw = []
     last = None
-    i = 0
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+    for i, frame in enumerate(iter_frames(src_path, info, det_w)):
         if i % settings.detect_every == 0:
-            x = det.detect(frame, last)
+            x = det.detect(frame, None if last is None else last / back)
             if x is not None:
+                x *= back
                 last = x
             raw.append(np.nan if x is None else x)
         else:
             raw.append(np.nan)
-        i += 1
         if progress and i % 15 == 0:
             progress(0.20 + 0.35 * min(i / total, 1.0), "Tracking speaker")
-    cap.release()
     n = len(raw)
     if n == 0:
-        raise RuntimeError("The video has no frames.")
+        raise RuntimeError("Couldn't read any video frames from the download.")
     found = int(np.sum(~np.isnan(raw)))
-    log(f"Speaker found in {found} of {(n + settings.detect_every - 1) // settings.detect_every} checks.")
+    checks = (n + settings.detect_every - 1) // settings.detect_every
+    log(f"Speaker found in {found} of {checks} checks.")
     lefts = build_camera_path(np.array(raw, dtype=float), fps, crop_w, src_w, settings.lock_in)
 
     # Pass 2: crop + encode, piping frames into ffmpeg with the cleaned audio.
@@ -513,26 +571,26 @@ def render_vertical(src_path: str, out_path: str, settings: ClipSettings,
         "-movflags", "+faststart", "-shortest", out_path,
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **_quiet())
-    cap = cv2.VideoCapture(src_path)
     interp = cv2.INTER_AREA if crop_h > OUT_H else cv2.INTER_CUBIC
+    written = 0
     try:
-        for j in range(n):
-            ok, frame = cap.read()
-            if not ok:
+        for j, frame in enumerate(iter_frames(src_path, info)):
+            if j >= n:
                 break
             x0 = int(round(lefts[j]))
             crop = frame[top:top + crop_h, x0:x0 + crop_w]
             proc.stdin.write(cv2.resize(crop, (OUT_W, OUT_H), interpolation=interp).tobytes())
+            written += 1
             if progress and j % 15 == 0:
                 progress(0.55 + 0.44 * (j / n), "Rendering vertical clip")
     except BrokenPipeError:
         pass
     finally:
-        cap.release()
         if proc.stdin:
             proc.stdin.close()
         err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
         proc.wait()
+    log(f"Rendered {written} frames ({written / fps:.1f}s).")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed:\n{err[-1500:]}")
     if progress:
@@ -547,7 +605,33 @@ def make_clip(url: str, start: str, end: str, settings: ClipSettings,
     with tempfile.TemporaryDirectory() as tmp:
         if progress:
             progress(0.01, "Downloading")
-        src = download_section(url, s, e, tmp, max_height=max_height, progress=progress, log=log)
+        want = e - s
+        src = None
+        best_len = -1.0
+        attempts = [(max_height, "")]
+        if max_height > 1080:
+            attempts.append((1080, " at 1080p"))
+        attempts.append((720, " at 720p"))
+        for k, (height, label) in enumerate(attempts):
+            sub = os.path.join(tmp, f"try{k}")
+            os.makedirs(sub)
+            try:
+                path = download_section(url, s, e, sub, max_height=height, progress=progress, log=log)
+            except RuntimeError as ex:
+                if k == len(attempts) - 1 and src is None:
+                    raise
+                log(str(ex).splitlines()[0])
+                continue
+            got = probe(path).duration or 0.0
+            log(f"Downloaded {got:.1f}s of {want:.0f}s{label}.")
+            if got > best_len:
+                src, best_len = path, got
+            if got >= want * 0.95 - 0.5:
+                break
+            if k + 1 < len(attempts):
+                log(f"YouTube sent a shorter section than asked — retrying{attempts[k + 1][1]}…")
+        if best_len < want * 0.95 - 0.5:
+            log(f"WARNING: could only get {best_len:.0f}s of the {want:.0f}s section from YouTube.")
         def stamp(t):
             t = int(t)
             return (f"{t // 3600}h" if t >= 3600 else "") + f"{t % 3600 // 60:02d}m{t % 60:02d}s"
