@@ -129,8 +129,8 @@ class Api:
                 return {"error": "Paste a YouTube link first."}
             core.validate_range(str(p.get("start", "")), str(p.get("end", "")))
             settings = core.ClipSettings(
-                lock_in=float(p.get("lock_in", 55)),
-                noise_reduction=float(p.get("noise", 40)),
+                lock_in=float(p.get("lock_in", 100)),
+                noise_reduction=float(p.get("noise", 20)),
                 normalize_audio=bool(p.get("normalize", True)),
             )
             quality = int(p.get("quality", 2160))

@@ -507,8 +507,8 @@ def iter_frames(path: str, info: VideoInfo, width: int | None = None):
 # --------------------------------------------------------------------------
 @dataclass
 class ClipSettings:
-    lock_in: float = 50
-    noise_reduction: float = 40
+    lock_in: float = 100
+    noise_reduction: float = 20
     normalize_audio: bool = True
     detect_every: int = 3        # run detector every N frames
     crf: int = 20

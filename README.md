@@ -30,8 +30,8 @@ On first launch the app downloads two small helper tools (about 60 MB) and sets 
 1. Paste a YouTube link. A preview appears right away.
 2. Set the **Start** and **End** times by typing them (e.g. `42:10`) or by pausing the preview and pressing **Set**. The preview plays just that section, and the badge shows the clip length (max 5 minutes). A link that already has a time in it (`&t=…`) fills in the start for you.
 3. Adjust the sliders:
-   - **Speaker tracking:** *Smooth* gives a calm camera that ignores small steps. *Locked on* keeps the speaker tightly centered. **50–65** suits most speakers who move around.
-   - **Noise cancellation:** **30–50** is typical. Use 70+ only for very noisy rooms.
+   - **Speaker tracking:** *Smooth* gives a calm camera that ignores small steps. *Locked on* keeps the speaker tightly centered. Starts at **100** (locked on). Lower it if the camera feels jumpy.
+   - **Noise cancellation:** Starts at **20** for a light cleanup. Raise it to 30–50 for HVAC hum or hiss, and use 70+ only for very noisy rooms.
 4. Click **Make vertical clip**. When it's done, use **Play** or **Show**. Clips are saved in a **Vertical Clips** folder in your home folder. Open **Logs** if you need details.
 
 A 1-minute clip takes about 1–2 minutes on a typical laptop.
