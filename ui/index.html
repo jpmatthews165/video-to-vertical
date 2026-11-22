@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Video to Vertical</title>
+<style>
+  :root {
+    --bg: #F6F6F8;
+    --card: #FFFFFF;
+    --text: #17171C;
+    --muted: #6E6E7A;
+    --line: #E6E6EC;
+    --field: #F2F2F6;
+    --accent: #7B5CFA;
+    --accent-2: #A84EF2;
+    --accent-soft: rgba(123, 92, 250, .12);
+    --danger: #E5484D;
+    --ok: #30A46C;
+    --radius: 14px;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111114;
+      --card: #1A1A1F;
+      --text: #F2F2F5;
+      --muted: #8E8E99;
+      --line: #2A2A31;
+      --field: #232329;
+      --accent-soft: rgba(140, 110, 255, .18);
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body {
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Inter, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: 22px 22px 28px;
+    user-select: none; -webkit-user-select: none;
+  }
+  input, select, button, textarea { font: inherit; color: inherit; }
+  .wrap { max-width: 620px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  header img { width: 40px; height: 40px; }
+  header h1 { font-size: 19px; font-weight: 650; letter-spacing: -.01em; margin: 0; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+  .label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 0 0 6px; letter-spacing: .02em; }
+
+  .field { display: flex; align-items: center; background: var(--field); border: 1px solid transparent;
+           border-radius: 10px; transition: border-color .15s, box-shadow .15s; }
+  .field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .field input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; padding: 10px 12px;
+                 user-select: text; -webkit-user-select: text; }
+  .field.invalid { border-color: var(--danger); }
+
+  .ghost { border: 0; background: transparent; color: var(--accent); font-weight: 600; font-size: 13px;
+           padding: 6px 10px; border-radius: 8px; cursor: pointer; white-space: nowrap; }
+  .ghost:hover { background: var(--accent-soft); }
+  .ghost:disabled { color: var(--muted); background: none; cursor: default; opacity: .6; }
+
+  .player { position: relative; margin-top: 12px; aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden;
+            background: var(--field); }
+  .player iframe, .player #yt { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .placeholder { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+                 color: var(--muted); font-size: 13px; padding: 20px; }
+  .placeholder svg { display: block; margin: 0 auto 8px; opacity: .55; }
+  .placeholder a { color: var(--accent); cursor: pointer; text-decoration: none; font-weight: 600; }
+
+  .times { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  .times > div { min-width: 0; }
+  .times .field input { font-variant-numeric: tabular-nums; width: 100%; }
+  .clipinfo { display: flex; justify-content: space-between; align-items: center; margin-top: 10px;
+              font-size: 12.5px; color: var(--muted); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 99px;
+          background: var(--accent-soft); color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .chip.bad { background: rgba(229, 72, 77, .12); color: var(--danger); }
+
+  .row { margin-bottom: 16px; }
+  .row:last-child { margin-bottom: 0; }
+  .row-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .row-head .title { font-weight: 600; }
+  .row-head .val { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+  .ends { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 22px; background: transparent;
+                      margin: 6px 0 0; cursor: pointer; }
+  input[type=range]::-webkit-slider-runnable-track { height: 4px; border-radius: 4px;
+    background: linear-gradient(90deg, var(--accent) var(--p, 50%), var(--line) var(--p, 50%)); }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: -7px;
+    border-radius: 50%; background: #fff; border: 0; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+  input[type=range]:focus { outline: none; }
+
+  .options { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .toggle input { display: none; }
+  .switch { width: 36px; height: 22px; border-radius: 99px; background: var(--line); position: relative; transition: background .2s; flex: none; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%;
+                   background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: transform .2s; }
+  .toggle input:checked + .switch { background: var(--accent); }
+  .toggle input:checked + .switch::after { transform: translateX(14px); }
+  select { background: var(--field); border: 0; border-radius: 10px; padding: 8px 10px; outline: none; cursor: pointer; }
+
+  .primary { width: 100%; border: 0; border-radius: 12px; padding: 13px; font-weight: 650; font-size: 15px; color: #fff;
+             background: linear-gradient(135deg, var(--accent), var(--accent-2)); cursor: pointer;
+             box-shadow: 0 6px 18px -6px rgba(123, 92, 250, .6); transition: transform .08s, opacity .2s; }
+  .primary:active { transform: scale(.99); }
+  .primary:disabled { opacity: .45; cursor: default; box-shadow: none; }
+  .primary.busy:disabled { opacity: .85; cursor: progress; }
+
+  .progress { display: none; }
+  .progress.on { display: block; }
+  .bar { height: 6px; border-radius: 6px; background: var(--line); overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2));
+               transition: width .25s ease; }
+  .status { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+
+  .result { display: none; align-items: center; gap: 12px; }
+  .result.on { display: flex; }
+  .result .check { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+                   background: rgba(48, 164, 108, .14); color: var(--ok); flex: none; }
+  .result .name { flex: 1; min-width: 0; }
+  .result .name b { display: block; font-weight: 600; }
+  .result .name span { display: block; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .result.error .check { background: rgba(229, 72, 77, .14); color: var(--danger); }
+
+  details { border-top: 1px solid var(--line); padding-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12.5px; list-style: none; display: flex; align-items: center; gap: 6px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+                    transform: rotate(-45deg); transition: transform .15s; margin-right: 2px; }
+  details[open] summary::before { transform: rotate(45deg); }
+  pre#log { margin: 10px 0 0; max-height: 180px; overflow: auto; padding: 10px 12px; border-radius: 10px; background: var(--field);
+            font: 11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; user-select: text; -webkit-user-select: text; }
+  footer { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <img src="icon.png" alt="">
+    <div>
+      <h1>Video to Vertical</h1>
+      <p>Turn any horizontal video into a vertical clip that follows the speaker.</p>
+    </div>
+  </header>
+
+  <!-- Source -->
+  <section class="card">
+    <label class="label" for="url">YouTube link</label>
+    <div class="field" id="urlField">
+      <input id="url" type="text" placeholder="https://youtube.com/watch?v=…" spellcheck="false" autocomplete="off">
+      <button class="ghost" id="pasteBtn" type="button">Paste</button>
+    </div>
+
+    <div class="player" id="player">
+      <div class="placeholder" id="ph">
+        <div>
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>
+          Paste a link to preview your clip
+        </div>
+      </div>
+      <div id="yt"></div>
+    </div>
+
+    <div class="times">
+      <div>
+        <label class="label" for="start">Start</label>
+        <div class="field" id="startField">
+          <input id="start" type="text" value="0:00" spellcheck="false">
+          <button class="ghost setbtn" data-target="start" type="button" disabled title="Use the player's current time">Set</button>
+        </div>
+      </div>
+      <div>
+        <label class="label" for="end">End</label>
+        <div class="field" id="endField">
+          <input id="end" type="text" value="1:00" spellcheck="false">
+          <button class="ghost setbtn" data-target="end" type="button" disabled title="Use the player's current time">Set</button>
+        </div>
+      </div>
+    </div>
+    <div class="clipinfo">
+      <span id="hint">Use <b>Set</b> to grab the player's current time.</span>
+      <span class="chip" id="len">1:00</span>
+    </div>
+  </section>
+
+  <!-- Settings -->
+  <section class="card">
+    <div class="row">
+      <div class="row-head"><span class="title">Speaker tracking</span><span class="val" id="lockVal">55</span></div>
+      <input type="range" id="lock" min="0" max="100" value="55">
+      <div class="ends"><span>Smooth</span><span>Locked on</span></div>
+    </div>
+    <div class="row">
+      <div class="row-head"><span class="title">Noise cancellation</span><span class="val" id="noiseVal">40</span></div>
+      <input type="range" id="noise" min="0" max="100" value="40">
+      <div class="ends"><span>Off</span><span>Strongest</span></div>
+    </div>
+    <div class="row options">
+      <label class="toggle"><input type="checkbox" id="normalize" checked><span class="switch"></span>Even out volume</label>
+      <select id="quality" title="Download quality">
+        <option value="2160">Best quality</option>
+        <option value="1080">1080p · faster</option>
+        <option value="720">720p · fastest</option>
+      </select>
+    </div>
+  </section>
+
+  <button class="primary" id="go" type="button">Make vertical clip</button>
+
+  <section class="card progress" id="progress">
+    <div class="bar"><div id="barFill"></div></div>
+    <div class="status"><span id="statusText">Starting…</span><span id="pct">0%</span></div>
+  </section>
+
+  <section class="card result" id="result">
+    <div class="check" id="resultIcon">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+    </div>
+    <div class="name"><b id="resultTitle">Clip ready</b><span id="resultName"></span></div>
+    <button class="ghost" id="playBtn" type="button">Play</button>
+    <button class="ghost" id="revealBtn" type="button">Show</button>
+  </section>
+
+  <details id="logs">
+    <summary>Logs</summary>
+    <pre id="log"></pre>
+  </details>
+
+  <footer>
+    <span id="outDir">Saved to Vertical Clips</span>
+    <button class="ghost" id="folderBtn" type="button">Open folder</button>
+  </footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const MAX = 300;
+let api = null, ytReady = false, ytFailed = false, player = null, videoId = null, loopTimer = null, busy = false;
+
+/* ---------- helpers ---------- */
+function parseTime(t) {
+  t = (t || "").trim();
+  if (!/^\d+(:\d{1,2}){0,2}(\.\d+)?$/.test(t)) return null;
+  return t.split(":").reduce((acc, p) => acc * 60 + parseFloat(p), 0);
+}
+function fmt(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+}
+function videoIdFrom(url) {
+  url = (url || "").trim();
+  const m = url.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|live\/|shorts\/|embed\/|v\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : (/^[A-Za-z0-9_-]{11}$/.test(url) ? url : null);
+}
+function urlStartTime(url) {
+  const m = (url || "").match(/[?&#]t=(\d+h)?(\d+m)?(\d+)s?/);
+  if (!m) return null;
+  return (parseInt(m[1]) || 0) * 3600 + (parseInt(m[2]) || 0) * 60 + (parseInt(m[3]) || 0);
+}
+function range() {
+  const s = parseTime($("start").value), e = parseTime($("end").value);
+  return { s, e, ok: s !== null && e !== null && e > s && e - s <= MAX };
+}
+
+/* ---------- clip length + validation ---------- */
+function refreshTimes() {
+  const { s, e, ok } = range();
+  $("startField").classList.toggle("invalid", s === null);
+  $("endField").classList.toggle("invalid", e === null || (s !== null && e <= s));
+  const chip = $("len");
+  if (s === null || e === null) { chip.textContent = "Check times"; chip.classList.add("bad"); }
+  else if (e <= s) { chip.textContent = "End before start"; chip.classList.add("bad"); }
+  else if (e - s > MAX) { chip.textContent = `${fmt(e - s)} · max 5:00`; chip.classList.add("bad"); }
+  else { chip.textContent = `${fmt(e - s)} clip`; chip.classList.remove("bad"); }
+  $("go").disabled = busy || !ok || !videoId;
+  return ok;
+}
+
+/* ---------- YouTube preview ---------- */
+function loadYT() {
+  if (window.YT && YT.Player) { ytReady = true; return; }
+  const tag = document.createElement("script");
+  tag.src = "https://www.youtube.com/iframe_api";
+  tag.onerror = () => { ytFailed = true; document.head.removeChild(tag); if (videoId) showFallback("Couldn't load the preview (are you online?)."); };
+  document.head.appendChild(tag);
+}
+window.onYouTubeIframeAPIReady = () => { ytReady = true; if (videoId) showPreview(); };
+
+function showFallback(msg) {
+  $("ph").style.display = "grid";
+  $("ph").innerHTML = `<div>${msg}<br><a id="openYt">Open in YouTube ↗</a></div>`;
+  const a = $("openYt");
+  if (a) a.onclick = () => api && api.open_url(`https://www.youtube.com/watch?v=${videoId}&t=${Math.floor(range().s || 0)}s`);
+}
+
+function cueClip() {
+  if (!player || !player.cueVideoById) return;
+  const { s, e } = range();
+  const opts = { videoId, startSeconds: s || 0 };
+  if (e && s !== null && e > s) opts.endSeconds = e;
+  player.cueVideoById(opts);
+}
+
+function showPreview() {
+  if (!videoId) return;
+  if (!ytReady) {
+    if (ytFailed) { ytFailed = false; loadYT(); showFallback("Loading preview…"); } else loadYT();
+    return;
+  }
+  $("ph").style.display = "none";
+  if (player) { cueClip(); return; }
+  const { s, e } = range();
+  player = new YT.Player("yt", {
+    videoId,
+    playerVars: { start: Math.floor(s || 0), end: e ? Math.ceil(e) : undefined, rel: 0, playsinline: 1,
+                  modestbranding: 1, origin: location.origin },
+    events: {
+      onReady: () => document.querySelectorAll(".setbtn").forEach(b => b.disabled = false),
+      onError: (ev) => showFallback(ev.data === 101 || ev.data === 150 ? "This video doesn't allow previews here."
+                                    : "Preview unavailable for this video."),
+      onStateChange: (ev) => {
+        // When the clip reaches its end, jump back to the start so it's easy to replay.
+        if (ev.data === YT.PlayerState.ENDED) { cueClip(); }
+      }
+    }
+  });
+  clearInterval(loopTimer);
+  loopTimer = setInterval(() => {
+    if (!player || !player.getCurrentTime || player.getPlayerState() !== 1) return;
+    const { s, e } = range();
+    if (e !== null && player.getCurrentTime() >= e) { player.pauseVideo(); player.seekTo(s || 0, true); }
+  }, 250);
+}
+
+function onUrlChange() {
+  const url = $("url").value;
+  const id = videoIdFrom(url);
+  $("urlField").classList.toggle("invalid", !!url.trim() && !id);
+  if (id && id !== videoId) {
+    videoId = id;
+    const t = urlStartTime(url);
+    if (t !== null) {           // a ?t= link sets the start, keeping the current length
+      const { s, e } = range();
+      const len = (s !== null && e !== null && e > s) ? Math.min(e - s, MAX) : 60;
+      $("start").value = fmt(t); $("end").value = fmt(t + len);
+    }
+    showPreview();
+  } else if (!id) {
+    videoId = null;
+    if (player) { player.destroy(); player = null; $("yt").remove(); const d = document.createElement("div"); d.id = "yt"; $("player").appendChild(d); }
+    $("ph").style.display = "grid";
+    $("ph").innerHTML = `<div><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="19" height="14" rx="3"/><path d="M10 9.5v5l4.5-2.5z" fill="currentColor"/></svg>Paste a link to preview your clip</div>`;
+    document.querySelectorAll(".setbtn").forEach(b => b.disabled = true);
+  }
+  refreshTimes();
+}
+
+let cueTimer = null;
+function onTimesChange() {
+  if (refreshTimes() && player) { clearTimeout(cueTimer); cueTimer = setTimeout(cueClip, 500); }
+}
+
+/* ---------- sliders ---------- */
+function bindSlider(id) {
+  const el = $(id), val = $(id + "Val");
+  const paint = () => { el.style.setProperty("--p", el.value + "%"); val.textContent = el.value; };
+  el.addEventListener("input", paint); paint();
+}
+
+/* ---------- events from Python ---------- */
+window.onProgress = (frac, msg) => {
+  const p = Math.max(0, Math.min(1, frac));
+  $("barFill").style.width = (p * 100).toFixed(1) + "%";
+  $("pct").textContent = Math.round(p * 100) + "%";
+  if (msg) $("statusText").textContent = msg;
+};
+window.onLog = (line) => {
+  const log = $("log");
+  log.textContent += line + "\n";
+  log.scrollTop = log.scrollHeight;
+};
+window.onDone = (path, name) => {
+  setBusy(false);
+  onProgress(1, "Done");
+  $("progress").classList.remove("on");
+  const r = $("result");
+  r.classList.remove("error"); r.classList.add("on");
+  $("resultTitle").textContent = "Clip ready";
+  $("resultName").textContent = name;
+  $("playBtn").style.display = $("revealBtn").style.display = "";
+};
+window.onError = (msg) => {
+  setBusy(false);
+  $("progress").classList.remove("on");
+  const r = $("result");
+  r.classList.add("on", "error");
+  $("resultIcon").innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 7v6M12 17h.01"/></svg>';
+  $("resultTitle").textContent = "Something went wrong";
+  $("resultName").textContent = msg.split("\n")[0];
+  $("playBtn").style.display = $("revealBtn").style.display = "none";
+  $("logs").open = true;
+};
+
+function setBusy(b) {
+  busy = b;
+  $("go").textContent = b ? "Working…" : "Make vertical clip";
+  $("go").classList.toggle("busy", b);
+  ["url", "start", "end", "lock", "noise", "normalize", "quality"].forEach(id => $(id).disabled = b);
+  refreshTimes();
+}
+
+/* ---------- wiring ---------- */
+function wire() {
+  $("url").addEventListener("input", onUrlChange);
+  $("start").addEventListener("input", onTimesChange);
+  $("end").addEventListener("input", onTimesChange);
+  bindSlider("lock"); bindSlider("noise");
+
+  document.querySelectorAll(".setbtn").forEach(b => b.addEventListener("click", () => {
+    if (!player || !player.getCurrentTime) return;
+    const t = player.getCurrentTime();
+    const target = b.dataset.target;
+    $(target).value = fmt(t);
+    if (target === "start") {             // keep end after start, within 5 min
+      const e = parseTime($("end").value);
+      if (e === null || e <= t || e - t > MAX) $("end").value = fmt(t + 60);
+    }
+    onTimesChange();
+  }));
+
+  $("pasteBtn").addEventListener("click", async () => {
+    let text = "";
+    try { text = api ? await api.paste() : await navigator.clipboard.readText(); } catch (_) {}
+    if (text) { $("url").value = text.trim(); onUrlChange(); }
+  });
+
+  $("go").addEventListener("click", async () => {
+    if (!refreshTimes() || !videoId || busy) return;
+    $("result").classList.remove("on", "error");
+    $("resultIcon").innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+    $("log").textContent = "";
+    $("progress").classList.add("on");
+    onProgress(0, "Starting…");
+    if (player && player.pauseVideo) player.pauseVideo();
+    setBusy(true);
+    const res = await api.make_clip({
+      url: $("url").value.trim(), start: $("start").value, end: $("end").value,
+      lock_in: +$("lock").value, noise: +$("noise").value,
+      normalize: $("normalize").checked, quality: +$("quality").value,
+    });
+    if (res && res.error) onError(res.error);
+  });
+
+  $("playBtn").addEventListener("click", () => api.open_clip());
+  $("revealBtn").addEventListener("click", () => api.reveal_clip());
+  $("folderBtn").addEventListener("click", () => api.open_folder());
+
+  refreshTimes();
+  loadYT();
+}
+
+window.addEventListener("pywebviewready", async () => {
+  api = window.pywebview.api;
+  try { const info = await api.app_info(); $("outDir").textContent = "Saved to " + info.out_dir; } catch (_) {}
+});
+document.addEventListener("DOMContentLoaded", wire);
+</script>
+</body>
+</html>

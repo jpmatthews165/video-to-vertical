@@ -1,4 +1,6 @@
-# Video to Vertical
+<p align="center"><img src="assets/icon.png" width="128" alt="Video to Vertical logo"></p>
+
+<h1 align="center">Video to Vertical</h1>
 
 Turn part of any horizontal YouTube video (talks, sermons, podcasts, interviews, lectures) into a **vertical 1080×1920 clip that follows the speaker**, with noise cancellation. It's a standalone app: there's no Python or anything else to install.
 
@@ -25,12 +27,12 @@ The app isn't signed with a paid Apple or Microsoft developer certificate, so yo
 On first launch the app downloads two small helper tools (about 60 MB) and sets them up. From then on it opens straight away.
 
 ## Using it
-1. Paste the YouTube link.
-2. Enter the **Start** and **End** times, e.g. `42:10` to `43:25` (max 5 minutes).
-3. Set the sliders:
-   - **Speaker tracking:** left gives a smooth, calm camera that ignores small steps. Right keeps the frame tightly locked on the speaker. **50–65** suits most speakers who move around.
-   - **Noise cancellation:** **30–50** is typical. Use 70+ only for very noisy rooms, since too much can make voices sound "watery".
-4. Click **Make clip**. Clips are saved in a **Vertical Clips** folder in your home folder. Use **▶ Play last clip** to check the result.
+1. Paste a YouTube link. A preview appears right away.
+2. Set the **Start** and **End** times by typing them (e.g. `42:10`) or by pausing the preview and pressing **Set**. The preview plays just that section, and the badge shows the clip length (max 5 minutes). A link that already has a time in it (`&t=…`) fills in the start for you.
+3. Adjust the sliders:
+   - **Speaker tracking:** *Smooth* gives a calm camera that ignores small steps. *Locked on* keeps the speaker tightly centered. **50–65** suits most speakers who move around.
+   - **Noise cancellation:** **30–50** is typical. Use 70+ only for very noisy rooms.
+4. Click **Make vertical clip**. When it's done, use **Play** or **Show**. Clips are saved in a **Vertical Clips** folder in your home folder. Open **Logs** if you need details.
 
 A 1-minute clip takes about 1–2 minutes on a typical laptop.
 
@@ -54,7 +56,9 @@ To build on your own machine instead: `pip install -r requirements.txt`, then `p
 
 | File | What it is |
 |---|---|
-| `desktop.py` | The app window |
+| `desktop.py` | The app (window + bridge to the engine) |
+| `ui/index.html` | The window's design and preview player |
+| `assets/` | Logo |
 | `core.py` | Download, speaker tracking, vertical crop, audio cleanup |
 | `build.py` | Packages the app for the current computer |
 | `.github/workflows/build.yml` | Builds all three versions on GitHub |

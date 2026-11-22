@@ -2,28 +2,29 @@
 Video to Vertical — desktop app.
 
 Horizontal video (YouTube) -> vertical 9:16 clip that follows the speaker,
-with noise cancellation. Packaged with PyInstaller into a standalone app.
+with noise cancellation. The window is a small local web page (ui/index.html)
+shown in the system's own web view (WebKit on macOS, Edge WebView2 on Windows).
 
     python desktop.py               # open the app
     python desktop.py --selftest F  # headless check used by the build; writes report to F
 """
+import json
 import os
-import queue
 import subprocess
 import sys
 import threading
 import traceback
+import webbrowser
 from pathlib import Path
 
 import core
 
 APP_NAME = "Video to Vertical"
 OUTPUT_DIR = Path.home() / "Vertical Clips"
-QUALITY = {
-    "Best available (up to 4K, sharpest)": 2160,
-    "1080p (faster download)": 1080,
-    "720p (fastest)": 720,
-}
+
+
+def ui_path(name: str = "index.html") -> str:
+    return os.path.join(core.resource_dir(), "ui", name)
 
 
 def open_path(path: str) -> None:
@@ -33,6 +34,129 @@ def open_path(path: str) -> None:
         subprocess.Popen(["open", path])
     else:
         subprocess.Popen(["xdg-open", path])
+
+
+def reveal_path(path: str) -> None:
+    if core.IS_WIN:
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    elif core.IS_MAC:
+        subprocess.Popen(["open", "-R", path])
+    else:
+        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+
+
+def read_clipboard() -> str:
+    try:
+        if core.IS_MAC:
+            return subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=3).stdout
+        if core.IS_WIN:
+            import ctypes
+            from ctypes import wintypes
+            CF_UNICODETEXT = 13
+            u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+            u32.GetClipboardData.restype = wintypes.HANDLE
+            k32.GlobalLock.restype = ctypes.c_void_p
+            k32.GlobalLock.argtypes = [wintypes.HANDLE]
+            k32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+            if not u32.OpenClipboard(None):
+                return ""
+            try:
+                h = u32.GetClipboardData(CF_UNICODETEXT)
+                if not h:
+                    return ""
+                p = k32.GlobalLock(h)
+                try:
+                    return ctypes.wstring_at(p) if p else ""
+                finally:
+                    k32.GlobalUnlock(h)
+            finally:
+                u32.CloseClipboard()
+        return subprocess.run(["xclip", "-o", "-selection", "clipboard"],
+                              capture_output=True, text=True, timeout=3).stdout
+    except Exception:
+        return ""
+
+
+# --------------------------------------------------------------------------
+# Bridge exposed to the page as window.pywebview.api
+# --------------------------------------------------------------------------
+class Api:
+    def __init__(self):
+        self._window = None  # set after the window is created (not exposed to JS)
+        self._busy = False
+        self._last = None
+
+    def attach(self, window):
+        self._window = window
+
+    # -- calls into the page --
+    def _js(self, fn: str, *args):
+        if self._window is not None:
+            try:
+                self._window.evaluate_js(f"{fn}({', '.join(json.dumps(a) for a in args)})")
+            except Exception:
+                pass
+
+    # -- called from the page --
+    def app_info(self):
+        return {"out_dir": str(OUTPUT_DIR).replace(str(Path.home()), "~"), "name": APP_NAME}
+
+    def paste(self):
+        return read_clipboard()
+
+    def open_url(self, url):
+        if isinstance(url, str) and url.startswith("https://"):
+            webbrowser.open(url)
+
+    def open_folder(self):
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        open_path(str(OUTPUT_DIR))
+
+    def open_clip(self):
+        if self._last and os.path.exists(self._last):
+            open_path(self._last)
+
+    def reveal_clip(self):
+        if self._last and os.path.exists(self._last):
+            reveal_path(self._last)
+
+    def make_clip(self, p):
+        if self._busy:
+            return {"error": "A clip is already being made."}
+        try:
+            url = str(p.get("url", "")).strip()
+            if not url:
+                return {"error": "Paste a YouTube link first."}
+            core.validate_range(str(p.get("start", "")), str(p.get("end", "")))
+            settings = core.ClipSettings(
+                lock_in=float(p.get("lock_in", 55)),
+                noise_reduction=float(p.get("noise", 40)),
+                normalize_audio=bool(p.get("normalize", True)),
+            )
+            quality = int(p.get("quality", 2160))
+        except Exception as e:
+            return {"error": str(e)}
+
+        self._busy = True
+
+        def work():
+            try:
+                OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+                out = core.make_clip(url, str(p["start"]), str(p["end"]), settings, str(OUTPUT_DIR),
+                                     max_height=quality,
+                                     progress=lambda f, m: self._js("onProgress", f, m),
+                                     log=lambda m: self._js("onLog", m))
+                self._last = out
+                self._js("onLog", f"Saved to {out}")
+                self._js("onDone", out, os.path.basename(out))
+            except Exception as e:
+                self._js("onLog", traceback.format_exc(limit=3))
+                self._js("onError", str(e))
+            finally:
+                self._busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
 
 
 # --------------------------------------------------------------------------
@@ -50,8 +174,7 @@ def selftest(report_path: str) -> int:
         say(f"ffmpeg: {ff}")
         det = core.SpeakerDetector(log=say)
         say(f"face model loaded: {det.yunet is not None}")
-        if det.yunet is None:
-            ok = False
+        ok = ok and det.yunet is not None
         with tempfile.TemporaryDirectory() as tmp:
             src = os.path.join(tmp, "src.mp4")
             subprocess.run([ff, "-loglevel", "error", "-y",
@@ -64,8 +187,14 @@ def selftest(report_path: str) -> int:
             size = os.path.getsize(out)
             say(f"rendered vertical clip: {size} bytes")
             ok = ok and size > 10000
-        import tkinter  # noqa: F401  (the window toolkit must be bundled)
-        say("tkinter: ok")
+        for f in ("index.html", "icon.png"):
+            exists = os.path.exists(ui_path(f))
+            say(f"ui/{f}: {'ok' if exists else 'MISSING'}")
+            ok = ok and exists
+        import webview  # noqa: F401
+        say(f"pywebview: ok ({getattr(webview, '__version__', '?')})")
+        api = Api()
+        say(f"api check: {api.make_clip({'url': '', 'start': '0:00', 'end': '1:00'})}")
     except Exception:
         ok = False
         say(traceback.format_exc())
@@ -76,179 +205,37 @@ def selftest(report_path: str) -> int:
 
 
 # --------------------------------------------------------------------------
-# Window
+# App
 # --------------------------------------------------------------------------
 def run_app() -> None:
-    import tkinter as tk
-    from tkinter import ttk, messagebox
-    from tkinter.scrolledtext import ScrolledText
+    import webview
 
-    root = tk.Tk()
-    root.title(APP_NAME)
-    root.minsize(560, 640)
-    try:
-        ttk.Style().theme_use("aqua" if core.IS_MAC else "vista" if core.IS_WIN else "clam")
-    except tk.TclError:
-        pass
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    api = Api()
+    window = webview.create_window(
+        APP_NAME, url=ui_path(), js_api=api,
+        width=600, height=940, min_size=(460, 640),
+        background_color="#F6F6F8", text_select=True,
+    )
+    api.attach(window)
 
-    events: "queue.Queue[tuple]" = queue.Queue()
-    state = {"busy": False, "last": None}
-
-    pad = {"padx": 14, "pady": 4}
-    frm = ttk.Frame(root, padding=10)
-    frm.pack(fill="both", expand=True)
-    frm.columnconfigure(0, weight=1)
-    frm.columnconfigure(1, weight=1)
-
-    ttk.Label(frm, text="📱  Video to Vertical", font=("", 18, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", **pad)
-    ttk.Label(frm, text="Horizontal video → vertical clip that follows the speaker").grid(
-        row=1, column=0, columnspan=2, sticky="w", padx=14)
-
-    ttk.Label(frm, text="YouTube link").grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(14, 0))
-    url = tk.StringVar()
-    url_entry = ttk.Entry(frm, textvariable=url)
-    url_entry.grid(row=3, column=0, columnspan=2, sticky="ew", **pad)
-
-    ttk.Label(frm, text="Start (mm:ss or h:mm:ss)").grid(row=4, column=0, sticky="w", padx=14, pady=(8, 0))
-    ttk.Label(frm, text="End (max 5 min after start)").grid(row=4, column=1, sticky="w", padx=14, pady=(8, 0))
-    start, end = tk.StringVar(value="0:00"), tk.StringVar(value="1:00")
-    ttk.Entry(frm, textvariable=start, width=12).grid(row=5, column=0, sticky="ew", **pad)
-    ttk.Entry(frm, textvariable=end, width=12).grid(row=5, column=1, sticky="ew", **pad)
-
-    def slider(row, title, left, right, initial):
-        var = tk.DoubleVar(value=initial)
-        head = ttk.Frame(frm)
-        head.grid(row=row, column=0, columnspan=2, sticky="ew", padx=14, pady=(12, 0))
-        ttk.Label(head, text=title, font=("", 12, "bold")).pack(side="left")
-        val = ttk.Label(head, text=str(initial))
-        val.pack(side="right")
-        ttk.Scale(frm, from_=0, to=100, variable=var,
-                  command=lambda v: val.config(text=str(int(float(v))))).grid(
-            row=row + 1, column=0, columnspan=2, sticky="ew", padx=14)
-        ends = ttk.Frame(frm)
-        ends.grid(row=row + 2, column=0, columnspan=2, sticky="ew", padx=14)
-        ttk.Label(ends, text=left, foreground="gray").pack(side="left")
-        ttk.Label(ends, text=right, foreground="gray").pack(side="right")
-        return var
-
-    lock = slider(6, "Speaker tracking", "Smooth, calm camera", "Locked on speaker", 55)
-    noise = slider(9, "Noise cancellation", "Off", "Strongest", 40)
-
-    normalize = tk.BooleanVar(value=True)
-    ttk.Checkbutton(frm, text="Even out volume for social media", variable=normalize).grid(
-        row=12, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 0))
-
-    ttk.Label(frm, text="Download quality").grid(row=13, column=0, sticky="w", padx=14, pady=(8, 0))
-    quality = tk.StringVar(value=list(QUALITY)[0])
-    ttk.Combobox(frm, textvariable=quality, values=list(QUALITY), state="readonly").grid(
-        row=14, column=0, columnspan=2, sticky="ew", **pad)
-
-    go = ttk.Button(frm, text="Make clip")
-    go.grid(row=15, column=0, columnspan=2, sticky="ew", padx=14, pady=(14, 4))
-    bar = ttk.Progressbar(frm, maximum=1000)
-    bar.grid(row=16, column=0, columnspan=2, sticky="ew", **pad)
-    status = ttk.Label(frm, text="Ready.")
-    status.grid(row=17, column=0, columnspan=2, sticky="w", padx=14)
-
-    logbox = ScrolledText(frm, height=7, wrap="word", font=("Menlo" if core.IS_MAC else "Consolas", 10))
-    logbox.grid(row=18, column=0, columnspan=2, sticky="nsew", padx=14, pady=(8, 4))
-    logbox.configure(state="disabled")
-    frm.rowconfigure(18, weight=1)
-
-    btns = ttk.Frame(frm)
-    btns.grid(row=19, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
-    play = ttk.Button(btns, text="▶ Play last clip", state="disabled",
-                      command=lambda: state["last"] and open_path(state["last"]))
-    play.pack(side="left")
-    ttk.Button(btns, text="Open clips folder",
-               command=lambda: (OUTPUT_DIR.mkdir(parents=True, exist_ok=True), open_path(str(OUTPUT_DIR)))).pack(side="right")
-
-    def log(msg):
-        events.put(("log", msg))
-
-    def prog(frac, msg):
-        events.put(("progress", frac, msg))
-
-    def worker(args):
-        try:
-            out = core.make_clip(*args, progress=prog, log=log)
-            events.put(("done", out))
-        except Exception as e:
-            log(traceback.format_exc(limit=2))
-            events.put(("error", str(e)))
-
-    def start_job():
-        if state["busy"]:
-            return
-        if not url.get().strip():
-            messagebox.showwarning(APP_NAME, "Paste a YouTube link first.")
-            return
-        try:
-            core.validate_range(start.get(), end.get())
-        except ValueError as e:
-            messagebox.showwarning(APP_NAME, str(e))
-            return
-        settings = core.ClipSettings(lock_in=lock.get(), noise_reduction=noise.get(),
-                                     normalize_audio=normalize.get())
-        state["busy"] = True
-        go.config(state="disabled", text="Working…")
-        bar["value"] = 0
-        status.config(text="Starting…")
-        args = (url.get().strip(), start.get(), end.get(), settings, str(OUTPUT_DIR),
-                QUALITY.get(quality.get(), 2160))
-        threading.Thread(target=worker, args=(args,), daemon=True).start()
-
-    go.config(command=start_job)
-
-    def pump():
-        try:
-            while True:
-                ev = events.get_nowait()
-                kind = ev[0]
-                if kind == "log":
-                    logbox.configure(state="normal")
-                    logbox.insert("end", ev[1] + "\n")
-                    logbox.see("end")
-                    logbox.configure(state="disabled")
-                elif kind == "progress":
-                    bar["value"] = max(0, min(1000, ev[1] * 1000))
-                    status.config(text=ev[2] + "…")
-                elif kind in ("done", "error"):
-                    state["busy"] = False
-                    go.config(state="normal", text="Make clip")
-                    if kind == "done":
-                        state["last"] = ev[1]
-                        bar["value"] = 1000
-                        status.config(text=f"Done! Saved {os.path.basename(ev[1])}")
-                        play.config(state="normal")
-                        log(f"Saved to {ev[1]}")
-                    else:
-                        status.config(text="Something went wrong — see log.")
-                        messagebox.showerror(APP_NAME, ev[1])
-        except queue.Empty:
-            pass
-        root.after(100, pump)
-
-    root.after(100, pump)
-
-    # First launch: fetch helpers in the background so the first clip starts faster.
     def warmup():
+        # Fetch helper tools on first launch (and check yt-dlp updates daily) in the background.
         try:
-            if not core.tools_ready():
-                core.ensure_tools(progress=prog, log=log)
-                events.put(("progress", 0, "Ready"))
-            else:
-                core.ensure_tools(log=lambda m: None)  # daily yt-dlp update check
+            first = not core.tools_ready()
+            if first:
+                api._js("onLog", "First launch: setting up helper tools…")
+            core.ensure_tools(log=lambda m: api._js("onLog", m))
+            if first:
+                api._js("onLog", "Setup complete.")
         except Exception as e:
-            log(f"Setup will retry when you make a clip ({e}).")
+            api._js("onLog", f"Setup will retry when you make a clip ({e}).")
 
-    threading.Thread(target=warmup, daemon=True).start()
-    url_entry.focus_set()
-    root.mainloop()
+    webview.start(warmup, http_server=True, private_mode=False,
+                  storage_path=os.path.join(core.data_dir(), "webview"))
 
 
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "--selftest":
         sys.exit(selftest(sys.argv[2]))
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     run_app()

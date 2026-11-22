@@ -56,11 +56,16 @@ def main():
         "--name", NAME,
         "--add-binary", f"{ff}{sep}bin",
         "--add-data", f"models{sep}models",
+        "--add-data", f"ui{sep}ui",
+        "--icon", os.path.join("assets", "icon.png"),
+        "--collect-all", "webview",
         "--collect-data", "certifi",
         "--exclude-module", "imageio_ffmpeg",
         "--exclude-module", "matplotlib",
         "--exclude-module", "PyQt5",
+        "--exclude-module", "PyQt6",
         "--exclude-module", "PySide6",
+        "--exclude-module", "tkinter",
     ]
     if IS_MAC:
         args += ["--osx-bundle-identifier", "org.videotovertical.app"]

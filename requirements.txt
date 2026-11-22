@@ -3,3 +3,5 @@ numpy
 imageio-ffmpeg
 certifi
 pyinstaller>=6.6
+pywebview>=5.3
+pillow
