@@ -1,0 +1,57 @@
+name: Build Video to Vertical apps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15          # Apple Silicon Macs (M1 and newer)
+          - os: macos-15-intel    # Intel Macs
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tools
+        run: python -m pip install -r requirements.txt
+      - name: Build app (includes self-test)
+        run: python build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.os }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish downloads
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Video to Vertical (build ${{ github.run_number }})
+          make_latest: true
+          files: out/*.zip
+          body: |
+            **Download the one for your computer:**
+            - Mac with Apple chip (M1/M2/M3/M4…): `VideoToVertical-mac-AppleSilicon.zip`
+            - Older Intel Mac: `VideoToVertical-mac-Intel.zip`
+            - Windows: `VideoToVertical-windows.zip`
+
+            See the README for first-open steps.

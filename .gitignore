@@ -1,0 +1,6 @@
+bin/
+models/
+build/
+dist/
+__pycache__/
+*.spec
