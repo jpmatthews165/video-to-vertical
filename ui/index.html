@@ -115,14 +115,37 @@
              box-shadow: 0 6px 18px -6px rgba(123, 92, 250, .6); transition: transform .08s, opacity .2s; }
   .primary:active { transform: scale(.99); }
   .primary:disabled { opacity: .45; cursor: default; box-shadow: none; }
-  .primary.busy:disabled { opacity: .85; cursor: progress; }
 
+
+  .transport { display: none; align-items: center; gap: 10px; margin-top: 10px; }
+  .transport.on { display: flex; }
+  .iconbtn { width: 34px; height: 34px; flex: none; border-radius: 50%; border: 0; cursor: pointer; display: grid; place-items: center;
+             background: var(--accent); color: #fff; }
+  .iconbtn:active { transform: scale(.96); }
+  .tl-wrap { flex: 1; min-width: 0; }
+  .timeline { position: relative; height: 30px; cursor: pointer; touch-action: none; }
+  .tl-track { position: absolute; left: 0; right: 0; top: 13px; height: 4px; border-radius: 4px; background: var(--line); }
+  .tl-clip { position: absolute; top: 9px; height: 12px; border-radius: 4px; background: var(--accent-soft);
+             border: 1.5px solid var(--accent); box-sizing: border-box; }
+  .tl-handle { position: absolute; top: 4px; width: 10px; height: 22px; margin-left: -5px; border-radius: 4px; background: var(--accent);
+               cursor: ew-resize; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .tl-handle::after { content: ""; position: absolute; left: 4px; top: 6px; width: 2px; height: 10px; border-radius: 1px; background: rgba(255,255,255,.75); }
+  .tl-head { position: absolute; top: 0; width: 2px; height: 30px; margin-left: -1px; background: var(--text); border-radius: 1px; pointer-events: none; }
+  .tl-head::before { content: ""; position: absolute; top: -3px; left: -4px; width: 10px; height: 10px; border-radius: 50%; background: var(--text); }
+  .tl-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; margin-top: 1px; }
+  .tl-labels .cur { color: var(--text); font-weight: 600; }
+  .zoom { font-size: 12px; padding: 6px 8px; }
   .progress { display: none; }
+  .prog-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+  .prog-head .title { font-weight: 600; }
+  .prog-head #pct { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+  .primary.cancel { background: var(--field); color: var(--danger); box-shadow: none; border: 1px solid var(--line); }
+  .primary.cancel:hover { border-color: var(--danger); }
   .progress.on { display: block; }
   .bar { height: 6px; border-radius: 6px; background: var(--line); overflow: hidden; }
   .bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2));
                transition: width .25s ease; }
-  .status { display: flex; justify-content: space-between; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+  .status { display: flex; justify-content: space-between; margin-top: 10px; font-size: 12.5px; color: var(--muted); }
 
   .result { display: none; align-items: center; gap: 12px; }
   .result.on { display: flex; }
@@ -169,9 +192,26 @@
           Paste a link to preview your clip
         </div>
       </div>
-      <video id="vid" controls playsinline preload="metadata"></video>
+      <video id="vid" playsinline preload="metadata"></video>
       <audio id="aud" preload="auto"></audio>
       <div id="yt"></div>
+    </div>
+
+    <div class="transport" id="transport">
+      <button class="iconbtn" id="ppBtn" type="button" title="Play / pause (space)">
+        <svg id="ppIcon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>
+      </button>
+      <div class="tl-wrap">
+        <div class="timeline" id="tl">
+          <div class="tl-track"></div>
+          <div class="tl-clip" id="tlClip"></div>
+          <div class="tl-handle" id="hStart" title="Drag to set Start"></div>
+          <div class="tl-handle" id="hEnd" title="Drag to set End"></div>
+          <div class="tl-head" id="tlHead"></div>
+        </div>
+        <div class="tl-labels"><span id="tlLeft">0:00</span><span id="curTime" class="cur">0:00</span><span id="tlRight">0:00</span></div>
+      </div>
+      <button class="ghost zoom" id="zoomBtn" type="button" title="Switch between the area around your clip and the whole video">Whole video</button>
     </div>
 
     <div class="times">
@@ -191,13 +231,13 @@
       </div>
     </div>
     <div class="clipinfo">
-      <span id="hint"><button class="ghost" id="playClip" type="button" disabled style="margin-left:-10px">▶ Play clip</button> · pause anywhere and press <b>Set</b></span>
+      <span id="hint">Drag the handles on the timeline, or pause and press <b>Set</b>.</span>
       <span class="chip" id="len">1:00</span>
     </div>
   </section>
 
   <!-- Settings -->
-  <section class="card">
+  <section class="card" id="settings">
     <div class="row">
       <div class="row-head"><span class="title">Speaker tracking</span><span class="val" id="lockVal">100</span></div>
       <input type="range" id="lock" min="0" max="100" value="100">
@@ -218,12 +258,13 @@
     </div>
   </section>
 
-  <button class="primary" id="go" type="button">Make vertical clip</button>
-
   <section class="card progress" id="progress">
+    <div class="prog-head"><span class="title">Making your clip</span><span id="pct">0%</span></div>
     <div class="bar"><div id="barFill"></div></div>
-    <div class="status"><span id="statusText">Starting…</span><span id="pct">0%</span></div>
+    <div class="status"><span id="statusText">Starting…</span><span id="eta"></span></div>
   </section>
+
+  <button class="primary" id="go" type="button">Make vertical clip</button>
 
   <section class="card result" id="result">
     <div class="check" id="resultIcon">
@@ -248,6 +289,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const MAX = 300;
+let cancelling = false;
 let api = null, ytReady = false, ytFailed = false, player = null, videoId = null, loopTimer = null, busy = false;
 
 /* ---------- helpers ---------- */
@@ -286,7 +328,7 @@ function refreshTimes() {
   else if (e <= s) { chip.textContent = "End before start"; chip.classList.add("bad"); }
   else if (e - s > MAX) { chip.textContent = `${fmt(e - s)} · max 5:00`; chip.classList.add("bad"); }
   else { chip.textContent = `${fmt(e - s)} clip`; chip.classList.remove("bad"); }
-  $("go").disabled = busy || !ok || !videoId;
+  $("go").disabled = busy ? cancelling : (!ok || !videoId);
   return ok;
 }
 
@@ -300,7 +342,8 @@ const vid = () => $("vid"), aud = () => $("aud");
 function setPlaceholder(html) { $("ph").style.display = "grid"; $("ph").innerHTML = html; }
 function enableSet(on) {
   document.querySelectorAll(".setbtn").forEach(b => b.disabled = !on);
-  $("playClip").disabled = !on;
+  $("transport").classList.toggle("on", on);
+  winFrozen = null;
 }
 function log(msg) { try { api && api.js_log(msg); } catch (_) {} }
 
@@ -332,7 +375,7 @@ function cueClip() {
   const { s, e } = range();
   if (mode === "native") {
     const v = vid();
-    if (v.paused && s !== null && v.readyState >= 1) v.currentTime = s;
+    if (v.paused && !drag && s !== null && v.readyState >= 1) v.currentTime = s;
   } else if (mode === "yt" && player && player.cueVideoById) {
     const opts = { videoId, startSeconds: s || 0 };
     if (e && s !== null && e > s) opts.endSeconds = e;
@@ -340,12 +383,6 @@ function cueClip() {
   }
 }
 
-function playClip() {
-  const { s } = range();
-  if (s === null) return;
-  if (mode === "native") { vid().currentTime = s; vid().play(); }
-  else if (mode === "yt" && player) { player.seekTo(s, true); player.playVideo(); }
-}
 
 async function showPreview() {
   if (!videoId) return;
@@ -427,17 +464,150 @@ function loadYT() {
 }
 window.onYouTubeIframeAPIReady = () => { ytReady = true; };
 
-// Stop at the End time (when playback crosses it), and jump back to Start.
+/* ---------- Player controls + scrubbable timeline ---------- */
+const P = {
+  ready() {
+    if (mode === "native") return vid().readyState >= 1 && isFinite(vid().duration);
+    return mode === "yt" && player && player.getDuration && player.getDuration() > 0;
+  },
+  dur() { return mode === "native" ? vid().duration : player.getDuration(); },
+  playing() {
+    if (mode === "native") return !vid().paused;
+    return !!(player && player.getPlayerState && player.getPlayerState() === 1);
+  },
+  seek(t, precise = true) {
+    t = Math.max(0, Math.min(t, (this.dur() || t) - 0.05));
+    if (mode === "native") {
+      const v = vid();
+      if (!precise && v.fastSeek) v.fastSeek(t); else v.currentTime = t;
+    } else if (mode === "yt") player.seekTo(t, precise);
+    prevT = t;
+  },
+  play() { mode === "native" ? vid().play().catch(() => {}) : player.playVideo(); },
+  pause() { mode === "native" ? vid().pause() : player.pauseVideo(); },
+};
+
+function togglePlay() {
+  if (!P.ready()) return;
+  if (P.playing()) { P.pause(); return; }
+  const { s, e } = range();
+  const t = currentTime();
+  if (s !== null && e !== null && (t < s - 0.25 || t >= e - 0.1)) P.seek(s);
+  P.play();
+}
+function playClip() { const { s } = range(); if (s !== null && P.ready()) { P.seek(s); P.play(); } }
+
+let zoom = "clip", winFrozen = null, drag = null;
+
+function timelineWindow() {
+  if (winFrozen) return winFrozen;
+  const dur = P.dur();
+  if (!dur || !isFinite(dur)) return null;
+  if (zoom === "full") return [0, dur];
+  const { s, e } = range();
+  if (s !== null && e !== null && e > s) {
+    const pad = Math.max(20, (e - s) * 0.6);
+    return [Math.max(0, s - pad), Math.min(dur, e + pad)];
+  }
+  const t = currentTime() || 0;
+  return [Math.max(0, t - 60), Math.min(dur, t + 60)];
+}
+
+function pctOf(t, w) { return Math.max(0, Math.min(100, (t - w[0]) / (w[1] - w[0]) * 100)); }
+
+function renderTimeline() {
+  if (!P.ready()) return;
+  const w = timelineWindow();
+  if (!w || w[1] <= w[0]) return;
+  const t = currentTime() || 0;
+  const { s, e } = range();
+  const valid = s !== null && e !== null && e > s;
+  $("tlHead").style.left = pctOf(t, w) + "%";
+  $("tlHead").style.display = (t >= w[0] && t <= w[1]) ? "" : "none";
+  ["tlClip", "hStart", "hEnd"].forEach(id => $(id).style.display = valid ? "" : "none");
+  if (valid) {
+    const a = pctOf(s, w), b = pctOf(e, w);
+    $("tlClip").style.left = a + "%";
+    $("tlClip").style.width = Math.max(0.5, b - a) + "%";
+    $("hStart").style.left = a + "%";
+    $("hEnd").style.left = b + "%";
+    $("hStart").style.visibility = (s >= w[0] && s <= w[1]) ? "" : "hidden";
+    $("hEnd").style.visibility = (e >= w[0] && e <= w[1]) ? "" : "hidden";
+  }
+  $("tlLeft").textContent = fmt(w[0]);
+  $("tlRight").textContent = fmt(w[1]);
+  $("curTime").textContent = fmt(t);
+  $("ppIcon").innerHTML = P.playing() ? '<path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/>' : '<path d="M7 4.5v15l13-7.5z"/>';
+  $("zoomBtn").textContent = zoom === "clip" ? "Whole video" : "Zoom to clip";
+}
+
+function timeAt(clientX) {
+  const r = $("tl").getBoundingClientRect();
+  const w = timelineWindow();
+  const f = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+  return w[0] + f * (w[1] - w[0]);
+}
+
+function startDrag(ev) {
+  if (!P.ready()) return;
+  const r = $("tl").getBoundingClientRect();
+  const w = timelineWindow();
+  const { s, e } = range();
+  const valid = s !== null && e !== null && e > s && !busy;
+  const xs = valid ? r.left + pctOf(s, w) / 100 * r.width : -1e9;
+  const xe = valid ? r.left + pctOf(e, w) / 100 * r.width : -1e9;
+  const ds = Math.abs(ev.clientX - xs), de = Math.abs(ev.clientX - xe);
+  let kind = "head";
+  if (ev.target.id === "hStart" || (ds < 9 && ds <= de)) kind = "start";
+  else if (ev.target.id === "hEnd" || de < 9) kind = "end";
+  winFrozen = w;                                   // keep the scale still while dragging
+  drag = { kind, wasPlaying: P.playing() };
+  if (kind !== "head" && drag.wasPlaying) P.pause();
+  $("tl").setPointerCapture(ev.pointerId);
+  moveDrag(ev);
+  ev.preventDefault();
+}
+
+function moveDrag(ev) {
+  if (!drag) return;
+  let t = timeAt(ev.clientX);
+  const dur = P.dur();
+  if (drag.kind === "head") {
+    P.seek(t, false);
+  } else {
+    const { s, e } = range();
+    t = Math.round(t);
+    if (drag.kind === "start") {
+      t = Math.max(0, Math.max(e - MAX, Math.min(t, e - 1)));
+      $("start").value = fmt(t);
+    } else {
+      t = Math.min(Math.floor(dur), Math.min(s + MAX, Math.max(t, s + 1)));
+      $("end").value = fmt(t);
+    }
+    P.seek(t, false);                              // show the frame under the handle
+    refreshTimes();
+  }
+  renderTimeline();
+}
+
+function endDrag(ev) {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.kind === "head") P.seek(timeAt(ev.clientX), true);
+  winFrozen = null;
+  if (d.wasPlaying) P.play();
+  renderTimeline();
+}
+
+// Tick: update the timeline, and stop at End when playback runs into it (not when you scrub past it).
 setInterval(() => {
   const t = currentTime();
   if (t === null) return;
   const { s, e } = range();
-  const playing = mode === "native" ? !vid().paused : (player && player.getPlayerState && player.getPlayerState() === 1);
-  if (playing && e !== null && prevT < e && t >= e) {
-    if (mode === "native") { vid().pause(); vid().currentTime = s || 0; }
-    else { player.pauseVideo(); player.seekTo(s || 0, true); }
-  }
-  prevT = t;
+  if (!drag && P.playing() && e !== null && s !== null && e > s && prevT < e && t >= e && t - prevT < 1) {
+    P.pause(); P.seek(s);
+  } else prevT = t;
+  renderTimeline();
 }, 100);
 
 function onUrlChange() {
@@ -474,11 +644,17 @@ function bindSlider(id) {
 }
 
 /* ---------- events from Python ---------- */
+let jobStart = 0;
 window.onProgress = (frac, msg) => {
   const p = Math.max(0, Math.min(1, frac));
   $("barFill").style.width = (p * 100).toFixed(1) + "%";
   $("pct").textContent = Math.round(p * 100) + "%";
-  if (msg) $("statusText").textContent = msg;
+  if (msg) $("statusText").textContent = cancelling ? "Cancelling…" : msg;
+  const el = (Date.now() - jobStart) / 1000;
+  if (p > 0.22 && p < 1 && el > 8) {
+    const left = el * (1 - p) / p;
+    $("eta").textContent = left < 60 ? "under a minute left" : `about ${Math.round(left / 60)} min left`;
+  } else $("eta").textContent = "";
 };
 window.onLog = (line) => {
   const log = $("log");
@@ -487,17 +663,18 @@ window.onLog = (line) => {
 };
 window.onDone = (path, name) => {
   setBusy(false);
-  onProgress(1, "Done");
-  $("progress").classList.remove("on");
   const r = $("result");
   r.classList.remove("error"); r.classList.add("on");
   $("resultTitle").textContent = "Clip ready";
   $("resultName").textContent = name;
   $("playBtn").style.display = $("revealBtn").style.display = "";
 };
+window.onCancelled = () => {
+  setBusy(false);
+  $("result").classList.remove("on", "error");
+};
 window.onError = (msg) => {
   setBusy(false);
-  $("progress").classList.remove("on");
   const r = $("result");
   r.classList.add("on", "error");
   $("resultIcon").innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><path d="M12 7v6M12 17h.01"/></svg>';
@@ -509,9 +686,14 @@ window.onError = (msg) => {
 
 function setBusy(b) {
   busy = b;
-  $("go").textContent = b ? "Working…" : "Make vertical clip";
-  $("go").classList.toggle("busy", b);
-  ["url", "start", "end", "lock", "noise", "normalize", "quality"].forEach(id => $(id).disabled = b);
+  cancelling = false;
+  $("go").textContent = b ? "Cancel" : "Make vertical clip";
+  $("go").classList.toggle("cancel", b);
+  $("settings").style.display = b ? "none" : "";      // progress takes the settings' place
+  $("progress").classList.toggle("on", b);
+  if (b) { jobStart = Date.now(); $("eta").textContent = ""; }
+  ["url", "start", "end"].forEach(id => $(id).disabled = b);
+  document.querySelectorAll(".setbtn").forEach(x => x.disabled = b || !P.ready());
   refreshTimes();
 }
 
@@ -521,7 +703,22 @@ function wire() {
   $("start").addEventListener("input", onTimesChange);
   $("end").addEventListener("input", onTimesChange);
   bindSlider("lock"); bindSlider("noise");
-  $("playClip").addEventListener("click", playClip);
+  $("ppBtn").addEventListener("click", togglePlay);
+  $("vid").addEventListener("click", togglePlay);
+  $("zoomBtn").addEventListener("click", () => { zoom = zoom === "clip" ? "full" : "clip"; renderTimeline(); });
+  $("tl").addEventListener("pointerdown", startDrag);
+  $("tl").addEventListener("pointermove", moveDrag);
+  $("tl").addEventListener("pointerup", endDrag);
+  $("tl").addEventListener("pointercancel", endDrag);
+  document.addEventListener("keydown", (ev) => {
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName) || !P.ready()) return;
+    if (ev.code === "Space") { ev.preventDefault(); togglePlay(); }
+    else if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") {
+      ev.preventDefault();
+      const step = (ev.shiftKey ? 5 : 1) * (ev.key === "ArrowLeft" ? -1 : 1);
+      P.seek((currentTime() || 0) + step);
+    }
+  });
 
   document.querySelectorAll(".setbtn").forEach(b => b.addEventListener("click", () => {
     const t = currentTime();
@@ -542,14 +739,22 @@ function wire() {
   });
 
   $("go").addEventListener("click", async () => {
-    if (!refreshTimes() || !videoId || busy) return;
+    if (busy) {                                      // it's the Cancel button now
+      if (cancelling) return;
+      cancelling = true;
+      $("go").textContent = "Cancelling…";
+      $("statusText").textContent = "Cancelling…";
+      refreshTimes();
+      if (api) api.cancel();
+      return;
+    }
+    if (!refreshTimes() || !videoId) return;
     $("result").classList.remove("on", "error");
     $("resultIcon").innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
     $("log").textContent = "";
-    $("progress").classList.add("on");
-    onProgress(0, "Starting…");
-    if (mode === "native") vid().pause(); else if (player && player.pauseVideo) player.pauseVideo();
+    if (P.ready() && P.playing()) P.pause();
     setBusy(true);
+    onProgress(0, "Starting…");
     const res = await api.make_clip({
       url: $("url").value.trim(), start: $("start").value, end: $("end").value,
       lock_in: +$("lock").value, noise: +$("noise").value,

@@ -51,10 +51,67 @@ def data_dir() -> str:
 
 
 def _quiet() -> dict:
-    """Don't flash console windows on Windows when running helpers."""
+    """Don't flash console windows on Windows; run helpers in their own process group
+    so Cancel can stop them together with anything they start."""
     if IS_WIN:
-        return {"creationflags": 0x08000000}  # CREATE_NO_WINDOW
-    return {}
+        return {"creationflags": 0x08000000 | 0x00000200}  # CREATE_NO_WINDOW | NEW_PROCESS_GROUP
+    return {"start_new_session": True}
+
+
+def _kill_tree(proc) -> None:
+    try:
+        if IS_WIN:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, creationflags=0x08000000)
+        else:
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+class Cancelled(Exception):
+    """Raised when the user presses Cancel."""
+
+
+_cancel = threading.Event()
+_procs: set = set()
+_procs_lock = threading.Lock()
+
+
+def reset_cancel() -> None:
+    _cancel.clear()
+
+
+def cancel() -> None:
+    """Stop the current job: flag it and kill any helper processes it started."""
+    _cancel.set()
+    with _procs_lock:
+        procs = list(_procs)
+    for p in procs:
+        _kill_tree(p)
+
+
+def check_cancel() -> None:
+    if _cancel.is_set():
+        raise Cancelled()
+
+
+def _track(proc):
+    with _procs_lock:
+        _procs.add(proc)
+    if _cancel.is_set():
+        _kill_tree(proc)
+    return proc
+
+
+def _untrack(proc) -> None:
+    with _procs_lock:
+        _procs.discard(proc)
 
 
 def ffmpeg_exe() -> str:
@@ -88,6 +145,7 @@ def _download(url: str, dest: str, label: str, progress=None) -> None:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0
         while True:
+            check_cancel()
             chunk = r.read(1 << 16)
             if not chunk:
                 break
@@ -253,8 +311,9 @@ def download_section(url: str, start: float, end: float, workdir: str,
         "-o", out_tmpl, url,
     ]
     log("Downloading section from YouTube…")
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, env=env, **_quiet())
+    check_cancel()
+    proc = _track(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, env=env, **_quiet()))
     tail = []
     for line in proc.stdout:
         line = line.strip()
@@ -269,6 +328,8 @@ def download_section(url: str, start: float, end: float, workdir: str,
         elif "ERROR" in line or "WARNING" in line or "Downloading 1 format" in line:
             log(line)
     proc.wait()
+    _untrack(proc)
+    check_cancel()
     files = [f for f in os.listdir(workdir) if f.startswith("source.") and not f.endswith(".part")]
     if proc.returncode != 0 or not files:
         hint = "\n".join(tail[-5:])
@@ -486,7 +547,14 @@ def measure_noise_floor(src_path: str) -> float:
                   "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
            "-f", "null", "-"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=300, **_quiet()).stdout
+        check_cancel()
+        p = _track(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    text=True, **_quiet()))
+        try:
+            out, _ = p.communicate(timeout=300)
+        finally:
+            _untrack(p)
+        check_cancel()
         vals = [float(v) for v in re.findall(r"RMS_level=(-?[\d.]+)", out)]
         vals = [v for v in vals if v > -120]
         if len(vals) >= 5:
@@ -554,11 +622,12 @@ def iter_frames(path: str, info: VideoInfo, width: int | None = None):
     vf = f"fps={info.fps:g}" + (f",scale={w}:{h}:flags=area" if (w, h) != (info.width, info.height) else "")
     cmd = [ffmpeg_exe(), "-v", "error", "-nostdin", "-i", path, "-map", "0:v:0", "-an", "-sn",
            "-vf", vf, "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            bufsize=w * h * 3 * 2, **_quiet())
+    proc = _track(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   bufsize=w * h * 3 * 2, **_quiet()))
     size = w * h * 3
     try:
         while True:
+            check_cancel()
             buf = proc.stdout.read(size)
             if len(buf) < size:
                 break
@@ -567,6 +636,8 @@ def iter_frames(path: str, info: VideoInfo, width: int | None = None):
         proc.stdout.close()
         proc.kill()
         proc.wait()
+        _untrack(proc)
+    check_cancel()
 
 
 # --------------------------------------------------------------------------
@@ -637,7 +708,7 @@ def render_vertical(src_path: str, out_path: str, settings: ClipSettings,
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart", "-shortest", out_path,
     ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **_quiet())
+    proc = _track(subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, **_quiet()))
     interp = cv2.INTER_AREA if crop_h > OUT_H else cv2.INTER_CUBIC
     written = 0
     try:
@@ -650,13 +721,25 @@ def render_vertical(src_path: str, out_path: str, settings: ClipSettings,
             written += 1
             if progress and j % 15 == 0:
                 progress(0.55 + 0.44 * (j / n), "Rendering vertical clip")
-    except BrokenPipeError:
+    except (BrokenPipeError, OSError):
         pass
+    except Cancelled:
+        proc.kill()
     finally:
-        if proc.stdin:
-            proc.stdin.close()
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except Exception:
+            pass
         err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
         proc.wait()
+        _untrack(proc)
+    if _cancel.is_set():
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        raise Cancelled()
     log(f"Rendered {written} frames ({written / fps:.1f}s).")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed:\n{err[-1500:]}")
@@ -668,6 +751,7 @@ def render_vertical(src_path: str, out_path: str, settings: ClipSettings,
 def make_clip(url: str, start: str, end: str, settings: ClipSettings,
               out_dir: str, max_height: int = 2160, progress=None, log=print) -> str:
     s, e = validate_range(start, end)
+    reset_cancel()
     os.makedirs(out_dir, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         if progress:

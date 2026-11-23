@@ -112,6 +112,11 @@ class Api:
             self._js("onLog", msg)
             return {"error": msg}
 
+    def cancel(self):
+        if self._busy:
+            core.cancel()
+        return {"ok": True}
+
     def js_log(self, msg):
         self._js("onLog", str(msg)[:500])
 
@@ -160,6 +165,9 @@ class Api:
                 self._last = out
                 self._js("onLog", f"Saved to {out}")
                 self._js("onDone", out, os.path.basename(out))
+            except core.Cancelled:
+                self._js("onLog", "Cancelled.")
+                self._js("onCancelled")
             except Exception as e:
                 self._js("onLog", traceback.format_exc(limit=3))
                 self._js("onError", str(e))
