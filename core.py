@@ -263,9 +263,9 @@ def ytdlp_common(deno: str) -> list[str]:
     """Options that make yt-dlp tolerate slow or flaky connections to YouTube."""
     return [
         "--js-runtimes", f"deno:{deno}",
-        "--socket-timeout", "60",          # default 20s was timing out fetching YouTube's player code
-        "--retries", "10", "--fragment-retries", "10", "--extractor-retries", "5",
-        "--retry-sleep", "exp=1:20",
+        "--socket-timeout", "30",          # default 20s was timing out fetching YouTube's player code
+        "--retries", "5", "--fragment-retries", "5", "--extractor-retries", "3",
+        "--retry-sleep", "exp=1:8",
         "--cache-dir", os.path.join(data_dir(), "yt-dlp-cache"),  # keep solved player code between runs
     ]
 
@@ -290,47 +290,104 @@ def _fmt_time(sec: float) -> str:
     return f"{int(sec // 3600)}:{int(sec % 3600 // 60):02d}:{sec % 60:06.3f}"
 
 
+STALL_SECONDS = 90
+
+
+def _hms(text: str) -> float:
+    h, m, sec = text.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(sec)
+
+
 def download_section(url: str, start: float, end: float, workdir: str,
                      max_height: int = 2160, progress=None, log=print,
                      issue: "DownloadIssue | None" = None) -> str:
+    import queue as _queue
+    import time as _time
     ytdlp, deno = ensure_tools(progress=progress, log=log)
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(deno) + os.pathsep + env.get("PATH", "")
     out_tmpl = os.path.join(workdir, "source.%(ext)s")
+    want = end - start
     cmd = [
         ytdlp, "--no-playlist", "--newline", "--no-colors", "--no-mtime",
         "-f", f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
         "--merge-output-format", "mp4",
+        # Copy the section as-is (no re-encode here: the clip is re-encoded once, later).
         "--download-sections", f"*{_fmt_time(start)}-{_fmt_time(end)}",
-        "--force-keyframes-at-cuts",
         "--ffmpeg-location", ffmpeg_exe(),
         *ytdlp_common(deno),
-        # YouTube sometimes drops long high-bitrate connections; make ffmpeg resume instead of stopping.
-        "--downloader-args", "ffmpeg_i:-reconnect 1 -reconnect_streamed 1 "
-                             "-reconnect_on_network_error 1 -reconnect_delay_max 10",
+        # If YouTube drops the connection mid-download, resume instead of stopping early.
+        "--downloader-args", "ffmpeg_i:-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 5",
         "-o", out_tmpl, url,
     ]
-    log("Downloading section from YouTube…")
+    log(f"Downloading section from YouTube (up to {max_height}p)…")
     check_cancel()
     proc = _track(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, env=env, **_quiet()))
-    tail = []
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
+                                   text=True, errors="replace", env=env, **_quiet()))
+
+    lines: "_queue.Queue[str | None]" = _queue.Queue()
+
+    def reader():
+        for raw in proc.stdout:
+            for part in raw.replace("\r", "\n").split("\n"):
+                if part.strip():
+                    lines.put(part.strip())
+        lines.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+    tail: list[str] = []
+    last_activity = _time.time()
+    last_logged = 0.0
+    stalled = False
+    while True:
+        try:
+            line = lines.get(timeout=2)
+        except _queue.Empty:
+            if _cancel.is_set():
+                break
+            if _time.time() - last_activity > STALL_SECONDS:
+                stalled = True
+                log(f"No download progress for {STALL_SECONDS}s — restarting the download.")
+                _kill_tree(proc)
+                break
             continue
+        if line is None:
+            break
+        last_activity = _time.time()
         tail = (tail + [line])[-15:]
         if issue is not None:
             issue.scan(line)
+        frac = None
         m = re.search(r"\[download\]\s+([\d.]+)%", line)
-        if m and progress:
-            progress(0.02 + 0.18 * float(m.group(1)) / 100, "Downloading from YouTube")
+        if m:
+            frac = float(m.group(1)) / 100
+        else:
+            m = re.search(r"time=\s*(\d+:\d{2}:\d{2}(?:\.\d+)?)", line)   # ffmpeg progress
+            if m and want > 0:
+                frac = min(1.0, _hms(m.group(1)) / want)
+        if frac is not None:
+            speed = re.search(r"\bat\s+(~?\s*[\d.]+\s*\w+/s)", line) or re.search(r"speed=\s*([\d.]+x)", line)
+            sp = ""
+            if speed:
+                sp = speed.group(1).replace(" ", "")
+                sp = f" · {sp[:-1]}× real-time" if sp.endswith("x") else f" · {sp}"
+            label = f"Downloading from YouTube · {round(frac * 100)}%{sp}"
+            if progress:
+                progress(0.02 + 0.18 * frac, label)
+            if _time.time() - last_logged > 15:          # a heartbeat in Logs
+                last_logged = _time.time()
+                log(label)
         elif "ERROR" in line or "WARNING" in line or "Downloading 1 format" in line:
             log(line)
     proc.wait()
     _untrack(proc)
     check_cancel()
-    files = [f for f in os.listdir(workdir) if f.startswith("source.") and not f.endswith(".part")]
+    if stalled:
+        if issue is not None:
+            issue.network = True
+        raise RuntimeError("The download stalled.")
+    files = [f for f in os.listdir(workdir) if f.startswith("source.") and not f.endswith(".part")
+             and not f.endswith(".ytdl")]
     if proc.returncode != 0 or not files:
         hint = "\n".join(tail[-5:])
         raise RuntimeError("YouTube download failed. Check the link (is the video public or unlisted?).\n" + hint)
