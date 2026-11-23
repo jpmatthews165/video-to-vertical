@@ -275,9 +275,13 @@ class DownloadIssue:
     def __init__(self):
         self.challenge_failed = False
         self.network = False
+        self.live = False          # YouTube served a livestream recording in pieces (no single file)
 
     def scan(self, line: str):
         low = line.lower()
+        if ("moov atom not found" in low or "source=yt_live_broadcast" in low or "&live=1" in low
+                or "post_live" in low or "live event has ended" in low or "is_live" in low):
+            self.live = True
         if "challenge solving failed" in low or "signature solving failed" in low:
             self.challenge_failed = True
         if any(k in low for k in ("timed out", "unexpected_eof", "connection reset", "temporary failure",
@@ -300,7 +304,9 @@ def _hms(text: str) -> float:
 
 def download_section(url: str, start: float, end: float, workdir: str,
                      max_height: int = 2160, progress=None, log=print,
-                     issue: "DownloadIssue | None" = None) -> str:
+                     issue: "DownloadIssue | None" = None, method: str = "file") -> str:
+    """method: "file" (normal videos), "hls" (livestream recordings via YouTube's HLS playlist),
+    or "fragments" (livestream recordings fetched piece by piece)."""
     import queue as _queue
     import time as _time
     ytdlp, deno = ensure_tools(progress=progress, log=log)
@@ -308,10 +314,17 @@ def download_section(url: str, start: float, end: float, workdir: str,
     env["PATH"] = os.path.dirname(deno) + os.pathsep + env.get("PATH", "")
     out_tmpl = os.path.join(workdir, "source.%(ext)s")
     want = end - start
+    h = max_height
+    if method == "hls":
+        fmt = (f"b[protocol^=m3u8][height<={h}]/bv*[protocol^=m3u8][height<={h}]+ba[protocol^=m3u8]"
+               f"/b[protocol^=m3u8]")
+    else:
+        fmt = f"bv*[height<={h}]+ba/b[height<={h}]/b"
     cmd = [
         ytdlp, "--no-playlist", "--newline", "--no-colors", "--no-mtime",
-        "-f", f"bv*[height<={max_height}]+ba/b[height<={max_height}]/b",
+        "-f", fmt,
         "--merge-output-format", "mp4",
+        *(["--live-from-start"] if method == "fragments" else []),
         # Copy the section as-is (no re-encode here: the clip is re-encoded once, later).
         "--download-sections", f"*{_fmt_time(start)}-{_fmt_time(end)}",
         "--ffmpeg-location", ffmpeg_exe(),
@@ -320,7 +333,8 @@ def download_section(url: str, start: float, end: float, workdir: str,
         "--downloader-args", "ffmpeg_i:-reconnect 1 -reconnect_on_network_error 1 -reconnect_delay_max 5",
         "-o", out_tmpl, url,
     ]
-    log(f"Downloading section from YouTube (up to {max_height}p)…")
+    how = {"file": "", "hls": ", livestream mode", "fragments": ", livestream piece-by-piece mode"}[method]
+    log(f"Downloading section from YouTube (up to {max_height}p{how})…")
     check_cancel()
     proc = _track(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, errors="replace", env=env, **_quiet()))
@@ -389,7 +403,9 @@ def download_section(url: str, start: float, end: float, workdir: str,
     files = [f for f in os.listdir(workdir) if f.startswith("source.") and not f.endswith(".part")
              and not f.endswith(".ytdl")]
     if proc.returncode != 0 or not files:
-        hint = "\n".join(tail[-5:])
+        hint = "\n".join(t for t in tail[-5:] if "googlevideo.com" not in t)   # skip giant URLs
+        if issue is not None and issue.live:
+            raise RuntimeError("YouTube is serving this video as a livestream recording.\n" + hint)
         raise RuntimeError("YouTube download failed. Check the link (is the video public or unlisted?).\n" + hint)
     files.sort(key=lambda f: (not f.endswith(".mp4"), f))
     return os.path.join(workdir, files[0])
@@ -415,6 +431,7 @@ def preview_sources(url: str, log=print) -> dict:
         "18",                                                           # 360p mp4 with sound
         "bv*[height<=480][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]",
         "b[height<=720][vcodec^=avc1][acodec!=none]/b[height<=720]",
+        "b[protocol^=m3u8][height<=480]/b[protocol^=m3u8]",            # livestream recordings (plays on Mac)
     ]
     last_err = ""
     for fmt in tries:
@@ -816,45 +833,54 @@ def make_clip(url: str, start: str, end: str, settings: ClipSettings,
         want = e - s
         src = None
         best_len = -1.0
-        attempts = [(max_height, ""), (max_height, "")]
-        for h, lbl in ((1080, " at 1080p"), (720, " at 720p")):
-            if h < max_height:
-                attempts.append((h, lbl))
-        warned_network = False
-        skip = set()
-        for k, (height, label) in enumerate(attempts):
-            if k in skip:
-                continue
+        from collections import deque
+        lower = [h for h in (1080, 720) if h < max_height]
+        plan = deque([(max_height, "file")] + [(h, "file") for h in lower])
+        live_mode = retried_same = warned_network = False
+        last_error = None
+        k = 0
+        while plan:
+            height, method = plan.popleft()
             sub = os.path.join(tmp, f"try{k}")
+            k += 1
             os.makedirs(sub)
             issue = DownloadIssue()
             try:
                 path = download_section(url, s, e, sub, max_height=height, progress=progress,
-                                        log=log, issue=issue)
+                                        log=log, issue=issue, method=method)
                 got = probe(path).duration or 0.0
-                log(f"Downloaded {got:.1f}s of {want:.0f}s{label}.")
+                log(f"Downloaded {got:.1f}s of {want:.0f}s.")
             except RuntimeError as ex:
-                path, got = None, 0.0
+                path, got, last_error = None, 0.0, ex
                 log(str(ex).splitlines()[0])
-                if src is None and all(j in skip or j <= k for j in range(len(attempts))):
-                    raise
             if path and got > best_len:
                 src, best_len = path, got
             if got >= want * 0.95 - 0.5:
                 break
+            if issue.live and not live_mode:
+                # A recently finished (or still running) livestream: YouTube serves it in pieces,
+                # which the normal method can't cut. Switch to the livestream methods.
+                live_mode = True
+                log("This video is a livestream recording on YouTube — switching to livestream mode…")
+                plan = deque([(max_height, "hls"), (max_height, "fragments")] + [(h, "hls") for h in lower])
+                continue
             if issue.network and not warned_network:
                 warned_network = True
                 log("Your connection to YouTube is slow or dropping. If this keeps happening, "
                     "try another network or turn off any VPN or web filter.")
-            if k + 1 < len(attempts):
-                # A failed YouTube "challenge" usually means a one-off timeout: retry the same quality
-                # first; otherwise step down to a smaller stream.
-                nxt_k = k + 1
-                if attempts[nxt_k][0] == height and not (issue.challenge_failed or issue.network):
-                    skip.add(nxt_k)
-                    nxt_k += 1
-                if nxt_k < len(attempts):
-                    log(f"Didn't get the full section — retrying{attempts[nxt_k][1]}…")
+            if (issue.challenge_failed or issue.network) and not retried_same:
+                retried_same = True                      # likely a one-off hiccup: same settings again
+                plan.appendleft((height, method))
+                log("Retrying…")
+                continue
+            if plan:
+                log(f"Didn't get the full section — trying again (up to {plan[0][0]}p)…")
+        if src is None:
+            if live_mode:
+                raise RuntimeError(
+                    "YouTube is still processing this livestream, so this part can't be downloaded yet. "
+                    "This usually clears up within a few hours after the stream ends — please try again later.")
+            raise last_error or RuntimeError("YouTube download failed.")
         if best_len < want * 0.95 - 0.5:
             log(f"WARNING: could only get {best_len:.0f}s of the {want:.0f}s section from YouTube.")
         def stamp(t):
