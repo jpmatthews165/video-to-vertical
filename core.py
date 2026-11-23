@@ -201,13 +201,40 @@ def validate_range(start: str, end: str) -> tuple[float, float]:
 # --------------------------------------------------------------------------
 # Download
 # --------------------------------------------------------------------------
+def ytdlp_common(deno: str) -> list[str]:
+    """Options that make yt-dlp tolerate slow or flaky connections to YouTube."""
+    return [
+        "--js-runtimes", f"deno:{deno}",
+        "--socket-timeout", "60",          # default 20s was timing out fetching YouTube's player code
+        "--retries", "10", "--fragment-retries", "10", "--extractor-retries", "5",
+        "--retry-sleep", "exp=1:20",
+        "--cache-dir", os.path.join(data_dir(), "yt-dlp-cache"),  # keep solved player code between runs
+    ]
+
+
+class DownloadIssue:
+    """Notes what went wrong in one yt-dlp run, for retries and friendly messages."""
+    def __init__(self):
+        self.challenge_failed = False
+        self.network = False
+
+    def scan(self, line: str):
+        low = line.lower()
+        if "challenge solving failed" in low or "signature solving failed" in low:
+            self.challenge_failed = True
+        if any(k in low for k in ("timed out", "unexpected_eof", "connection reset", "temporary failure",
+                                  "network is unreachable", "remote end closed")):
+            self.network = True
+
+
 def _fmt_time(sec: float) -> str:
     sec = max(0.0, sec)
     return f"{int(sec // 3600)}:{int(sec % 3600 // 60):02d}:{sec % 60:06.3f}"
 
 
 def download_section(url: str, start: float, end: float, workdir: str,
-                     max_height: int = 2160, progress=None, log=print) -> str:
+                     max_height: int = 2160, progress=None, log=print,
+                     issue: "DownloadIssue | None" = None) -> str:
     ytdlp, deno = ensure_tools(progress=progress, log=log)
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(deno) + os.pathsep + env.get("PATH", "")
@@ -219,7 +246,7 @@ def download_section(url: str, start: float, end: float, workdir: str,
         "--download-sections", f"*{_fmt_time(start)}-{_fmt_time(end)}",
         "--force-keyframes-at-cuts",
         "--ffmpeg-location", ffmpeg_exe(),
-        "--js-runtimes", f"deno:{deno}",
+        *ytdlp_common(deno),
         # YouTube sometimes drops long high-bitrate connections; make ffmpeg resume instead of stopping.
         "--downloader-args", "ffmpeg_i:-reconnect 1 -reconnect_streamed 1 "
                              "-reconnect_on_network_error 1 -reconnect_delay_max 10",
@@ -234,6 +261,8 @@ def download_section(url: str, start: float, end: float, workdir: str,
         if not line:
             continue
         tail = (tail + [line])[-15:]
+        if issue is not None:
+            issue.scan(line)
         m = re.search(r"\[download\]\s+([\d.]+)%", line)
         if m and progress:
             progress(0.02 + 0.18 * float(m.group(1)) / 100, "Downloading from YouTube")
@@ -263,7 +292,7 @@ def preview_sources(url: str, log=print) -> dict:
     ytdlp, deno = ensure_tools(log=log)
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(deno) + os.pathsep + env.get("PATH", "")
-    base = [ytdlp, "--no-playlist", "--no-warnings", "-g", "--js-runtimes", f"deno:{deno}"]
+    base = [ytdlp, "--no-playlist", "--no-warnings", "-g", *ytdlp_common(deno)]
     tries = [
         "18",                                                           # 360p mp4 with sound
         "bv*[height<=480][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]",
@@ -646,28 +675,45 @@ def make_clip(url: str, start: str, end: str, settings: ClipSettings,
         want = e - s
         src = None
         best_len = -1.0
-        attempts = [(max_height, "")]
-        if max_height > 1080:
-            attempts.append((1080, " at 1080p"))
-        attempts.append((720, " at 720p"))
+        attempts = [(max_height, ""), (max_height, "")]
+        for h, lbl in ((1080, " at 1080p"), (720, " at 720p")):
+            if h < max_height:
+                attempts.append((h, lbl))
+        warned_network = False
+        skip = set()
         for k, (height, label) in enumerate(attempts):
+            if k in skip:
+                continue
             sub = os.path.join(tmp, f"try{k}")
             os.makedirs(sub)
+            issue = DownloadIssue()
             try:
-                path = download_section(url, s, e, sub, max_height=height, progress=progress, log=log)
+                path = download_section(url, s, e, sub, max_height=height, progress=progress,
+                                        log=log, issue=issue)
+                got = probe(path).duration or 0.0
+                log(f"Downloaded {got:.1f}s of {want:.0f}s{label}.")
             except RuntimeError as ex:
-                if k == len(attempts) - 1 and src is None:
-                    raise
+                path, got = None, 0.0
                 log(str(ex).splitlines()[0])
-                continue
-            got = probe(path).duration or 0.0
-            log(f"Downloaded {got:.1f}s of {want:.0f}s{label}.")
-            if got > best_len:
+                if src is None and all(j in skip or j <= k for j in range(len(attempts))):
+                    raise
+            if path and got > best_len:
                 src, best_len = path, got
             if got >= want * 0.95 - 0.5:
                 break
+            if issue.network and not warned_network:
+                warned_network = True
+                log("Your connection to YouTube is slow or dropping. If this keeps happening, "
+                    "try another network or turn off any VPN or web filter.")
             if k + 1 < len(attempts):
-                log(f"YouTube sent a shorter section than asked — retrying{attempts[k + 1][1]}…")
+                # A failed YouTube "challenge" usually means a one-off timeout: retry the same quality
+                # first; otherwise step down to a smaller stream.
+                nxt_k = k + 1
+                if attempts[nxt_k][0] == height and not (issue.challenge_failed or issue.network):
+                    skip.add(nxt_k)
+                    nxt_k += 1
+                if nxt_k < len(attempts):
+                    log(f"Didn't get the full section — retrying{attempts[nxt_k][1]}…")
         if best_len < want * 0.95 - 0.5:
             log(f"WARNING: could only get {best_len:.0f}s of the {want:.0f}s section from YouTube.")
         def stamp(t):
