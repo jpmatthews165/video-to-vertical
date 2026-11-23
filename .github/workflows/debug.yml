@@ -1,0 +1,21 @@
+name: debug-ytdlp
+on:
+  push:
+    branches: [debug-ytdlp]
+jobs:
+  probe:
+    runs-on: macos-15
+    steps:
+      - name: Get tools
+        run: |
+          curl -sL -o yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos && chmod +x yt-dlp
+          curl -sL -o deno.zip https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip && unzip -q deno.zip
+          brew install ffmpeg >/dev/null 2>&1 || true
+      - name: Info
+        run: |
+          ./yt-dlp --js-runtimes deno:./deno --print "live_status=%(live_status)s was_live=%(was_live)s duration=%(duration)s" "https://www.youtube.com/watch?v=-TpR4ggJbvc" || true
+          ./yt-dlp --js-runtimes deno:./deno -F "https://www.youtube.com/watch?v=-TpR4ggJbvc" || true
+      - name: Try HLS section
+        run: |
+          ./yt-dlp --js-runtimes deno:./deno -f "b[protocol^=m3u8][height<=1080]" --download-sections "*1:16:07-1:16:37" --ffmpeg-location "$(which ffmpeg)" -o hls.%(ext)s "https://www.youtube.com/watch?v=-TpR4ggJbvc" || true
+          ls -la; ffmpeg -hide_banner -i hls.mp4 2>&1 | grep -E "Duration|Stream" || true
